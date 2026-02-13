@@ -12,8 +12,18 @@ float simRateHz = 200;            // kolik bodů za sekundu generovat (simulace)
 int simPointsPerFrameMax = 12;    // pojistka, aby to nezabilo FPS
 
 // ---- Serial / reconnect ----
-String preferredPort = "COM7";
+// ---- Serial / reconnect ----
+// Windows: COM7 (pokud existuje)
+// Linux/RPi: /dev/ttyACM0 (pokud existuje)
+String preferredPort = defaultPreferredPort();
 int baud = 115200;
+
+String defaultPreferredPort() {
+  String os = System.getProperty("os.name").toLowerCase();
+  if (os.contains("win")) return "COM7";
+  if (os.contains("linux")) return "/dev/ttyACM0";
+  return ""; // fallback později
+}
 
 int reconnectEveryMs = 2000;
 int lastReconnectTryMs = 0;
@@ -555,27 +565,71 @@ void connectSerial() {
     String[] ports = Serial.list();
     println("Ports: " + join(ports, ", "));
 
-    for (String p : ports) {
-      if (p.equals(preferredPort)) {
-        myPort = new Serial(this, p, baud);
-        myPort.bufferUntil('\n');
-        println("Connected to " + p);
-        status = "WAITING";
-        return;
-      }
-    }
-
-    if (ports.length > 0) {
-      preferredPort = ports[0];
-      myPort = new Serial(this, ports[0], baud);
-      myPort.bufferUntil('\n');
-      println("Connected (fallback) to " + ports[0]);
-      status = "WAITING";
+    if (ports == null || ports.length == 0) {
+      println("No serial ports found.");
+      status = "ERROR";
       return;
     }
 
-    println("No serial ports found.");
-    status = "ERROR";
+    // 1) Zkus natvrdo preferredPort (COM7 na Win, /dev/ttyACM0 na Linux)
+    if (preferredPort != null && preferredPort.length() > 0) {
+      for (String p : ports) {
+        if (p.equals(preferredPort)) {
+          myPort = new Serial(this, p, baud);
+          myPort.bufferUntil('\n');
+          println("Connected to " + p);
+          status = "WAITING";
+          return;
+        }
+      }
+    }
+
+    String os = System.getProperty("os.name").toLowerCase();
+
+    // 2) Linux/RPi fallback: ttyACM*, pak ttyUSB*, pak cokoliv
+    if (os.contains("linux")) {
+      for (String p : ports) {
+        if (p.indexOf("ttyACM") >= 0) {
+          preferredPort = p;
+          myPort = new Serial(this, p, baud);
+          myPort.bufferUntil('\n');
+          println("Connected (fallback ttyACM) to " + p);
+          status = "WAITING";
+          return;
+        }
+      }
+      for (String p : ports) {
+        if (p.indexOf("ttyUSB") >= 0) {
+          preferredPort = p;
+          myPort = new Serial(this, p, baud);
+          myPort.bufferUntil('\n');
+          println("Connected (fallback ttyUSB) to " + p);
+          status = "WAITING";
+          return;
+        }
+      }
+    }
+
+    // 3) Windows fallback: první COM*, pak cokoliv
+    if (os.contains("win")) {
+      for (String p : ports) {
+        if (p.startsWith("COM")) {
+          preferredPort = p;
+          myPort = new Serial(this, p, baud);
+          myPort.bufferUntil('\n');
+          println("Connected (fallback COM) to " + p);
+          status = "WAITING";
+          return;
+        }
+      }
+    }
+
+    // 4) Poslední fallback: první port
+    preferredPort = ports[0];
+    myPort = new Serial(this, ports[0], baud);
+    myPort.bufferUntil('\n');
+    println("Connected (last resort) to " + ports[0]);
+    status = "WAITING";
 
   } catch(Exception e) {
     println("Connect failed: " + e);
