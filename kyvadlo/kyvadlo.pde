@@ -6,15 +6,12 @@ Serial myPort;
 // ============================
 // SIMULATION toggle
 // ============================
-boolean USE_SIM = false;           // <-- dej false, když chceš jet jen z ESP
+boolean USE_SIM = false;          // <-- false = ESP, true = simulace
 int SIM_MODE = 1;                 // 1=Lissajous, 2=Spiro, 3=Random walk
-float simRateHz = 200;            // kolik bodů za sekundu generovat (simulace)
-int simPointsPerFrameMax = 12;    // pojistka, aby to nezabilo FPS
+float simRateHz = 200;
+int simPointsPerFrameMax = 12;
 
 // ---- Serial / reconnect ----
-// ---- Serial / reconnect ----
-// Windows: COM7 (pokud existuje)
-// Linux/RPi: /dev/ttyACM0 (pokud existuje)
 String preferredPort = defaultPreferredPort();
 int baud = 115200;
 
@@ -22,7 +19,7 @@ String defaultPreferredPort() {
   String os = System.getProperty("os.name").toLowerCase();
   if (os.contains("win")) return "COM7";
   if (os.contains("linux")) return "/dev/ttyACM0";
-  return ""; // fallback později
+  return "";
 }
 
 int reconnectEveryMs = 2000;
@@ -36,107 +33,144 @@ ArrayDeque<PVector> queue = new ArrayDeque<PVector>();
 int segmentsPerFrame = 20;
 
 // ---- UI / stav ----
-String status = "WAITING";  // WAITING / CALIBRATING / RUN / ERROR
+String status = "WAITING";
 int lastDataMs = 0;
 
 // poslední souřadnice
-float lastX = 0, lastY = 0;               // raw ze senzoru/simulace
-float lastDrawX = 0, lastDrawY = 0;       // v pixelech na obrazovce
+float lastX = 0, lastY = 0;
+float lastDrawX = 0, lastDrawY = 0;
 boolean haveXY = false;
 
-boolean debugUI = false;                  // default: nic nevidět
+boolean debugUI = false;
 
-PGraphics canvasLayer;                    // <-- stopa
-PGraphics hud;                            // <-- debug overlay
+PGraphics canvasLayer;  // stopa
+PGraphics hud;          // debug overlay
 
 // tlačítko (viditelné jen v debug)
 int btnX = 20, btnY = 20, btnW = 170, btnH = 44;
 
 // ---- logging ----
-int linesIn = 0;          // kolik řádků přišlo za 1s (serial nebo sim)
-int segmentsDrawn = 0;    // kolik segmentů vykresleno za 1s
+int linesIn = 0;
+int segmentsDrawn = 0;
 int lastLogMs = 0;
 
 // ============================
 // SIM state
 // ============================
-float simT = 0;                      // čas simulace
-float simCarry = 0;                  // pro přesné dávkování bodů
-float rwX = 0, rwY = 0;              // random walk stav
+float simT = 0;
+float simCarry = 0;
+float rwX = 0, rwY = 0;
 
-// --- SIM "random drift" state (aby se to nepřekrývalo)
+// drift (aby se to v SIM tolik nepřekrývalo)
 float driftX = 0, driftY = 0;
 float driftVX = 0, driftVY = 0;
 
 // ============================
-// RENDER modes (0=line, 1=ink, 2=sand)
-// Q/W/E přepínají render
+// RENDER modes (0=line, 1=brush, 2=sand)
 // ============================
-int RENDER_MODE = 1; // default INK
+int RENDER_MODE = 1; // default BRUSH
 
 String renderModeName() {
   if (RENDER_MODE == 0) return "LINE";
-  if (RENDER_MODE == 1) return "INK";
+  if (RENDER_MODE == 1) return "BRUSH";
   return "SAND";
 }
 
 // ============================
-// INK (brush) settings
+// PALETTES
 // ============================
-boolean INK_MULTIPLY = true;   // multiply = ink look
+// 10 barev stopy (HSB: hue,sat,bri)
 
-float inkBrushR = 2.0;         // poloměr otisku (px)
-float inkAlpha = 18;           // 1..255 (nižší = pomalejší tmavnutí)
-float inkSpacing = 2;          // vzdálenost otisků po segmentu (px)
+// HSB palette: {H, S, B}  (H:0-360, S:0-100, B:0-100)
+float [][] STROKE_COLORS = {
+  {  0,  0,  0},  // 0: BLACK
+  {  0, 90, 85},  // 1: RED
+  { 60, 90, 95},  // 2: YELLOW
+  {220, 90, 85},  // 3: BLUE
 
-int inkHue = 210;              // 0..360
-int inkSat = 80;               // 0..100
-int inkBri = 20;               // 0..100 (nižší = tmavší)
+  { 30, 90, 92},  // 4: ORANGE   (RED + YELLOW)
+  {120, 90, 80},  // 5: GREEN    (YELLOW + BLUE)
+  {270, 85, 80},  // 6: PURPLE   (BLUE + RED)
+
+  { 25, 70, 45},  // 7: BROWN    (RED + YELLOW + BLUE) ~ “pigment mix”
+  {  0,  0, 100}   // 8: WHITE (hodí se třeba pro pozadí / speciální režimy)
+};
+
+
+int strokeColorIdx = 1;
+
+// 5 pozadí (HSB: hue,sat,bri)
+float[][] BG_COLORS = {
+  {0, 0, 100},    // bílá
+  {0, 0, 94},     // světle šedá
+  {45, 10, 98},   // papír
+  {220, 30, 14},  // tmavě modrá
+  {0, 0, 0}       // černá
+};
+int bgIdx = 0;
+
+// ============================
+// CURRENT COLORS (derived from palette)
+// ============================
+float lineHue, lineSat, lineBri;
+int inkHue, inkSat, inkBri;
+int sandHue, sandSat, sandBri;
+
+// ============================
+// BRUSH (ink) settings
+// ============================
+boolean INK_MULTIPLY = true;
+float inkBrushR = 2.0;
+float inkAlpha = 18;
+float inkSpacing = 2.0;
 
 // ============================
 // SAND settings
 // ============================
-float sandSpacing = 2.5;       // krok po segmentu (px)
-int sandGrainsPerStep = 4;     // kolik zrnek na krok
-float sandSpread = 3.0;        // rozptyl zrnek kolem stopy (px)
-float sandMinR = 0.8;          // min velikost zrna
-float sandMaxR = 1.7;          // max velikost zrna
-float sandAlpha = 22;          // 1..255 (vrstvení = tmavne)
-
-// barva písku v HSB (jemně hnědá)
-int sandHue = 35;
-int sandSat = 25;
-int sandBri = 55;
+float sandSpacing = 2.5;
+int sandGrainsPerStep = 4;
+float sandSpread = 3.0;
+float sandMinR = 0.8;
+float sandMaxR = 1.7;
+float sandAlpha = 22;
 
 // ============================
-// LINE settings (pixelová čára)
+// LINE settings
 // ============================
 float lineWeight = 2.0;
-
-// minimální délka segmentu (px), aby nevznikaly "tmavé tečky/kroužky"
 float MIN_LINE_SEG_PX = 0.8;
 
+// ============================
+// “rychlejší pohyb = světlejší/řidší”
+// (dist = délka segmentu v px)
+// ============================
+float SPEED_DIST_REF = 18.0;      // kolem téhle délky už se to výrazně zesvětluje
+float SPEED_ALPHA_MIN = 0.30;     // min násobek alfy (rychlé = ~0.3x)
+float SPEED_ALPHA_MAX = 1.25;     // max násobek alfy (pomalé = ~1.25x)
+float SPEED_SPACING_GAIN = 0.05;  // rychlé = větší rozestupy stampů
+
 void setup() {
-  size(800, 800);   // pro fullscreen dej fullScreen() nebo fullScreen(2)
+  size(800, 800); // pro fullscreen dej fullScreen() nebo fullScreen(2)
   smooth();
 
-  // vrstvy
   canvasLayer = createGraphics(width, height);
   hud = createGraphics(width, height);
 
-  // init canvas (HSB kvůli ink/sand barvě + alfa)
+  // canvas init
   canvasLayer.beginDraw();
   canvasLayer.colorMode(HSB, 360, 100, 100, 255);
-  canvasLayer.background(0, 0, 100); // bílá v HSB
+  canvasLayer.background(BG_COLORS[bgIdx][0], BG_COLORS[bgIdx][1], BG_COLORS[bgIdx][2]);
   canvasLayer.endDraw();
+
+  // nastav výchozí barvy stopy podle palety
+  applyStrokePalette();
 
   if (!USE_SIM) {
     println(Serial.list());
     connectSerial();
   } else {
     status = "RUN";
-    rwX = 0;
-    rwY = 0;
+    rwX = 0; rwY = 0;
   }
 
   lastDataMs = millis();
@@ -146,19 +180,19 @@ void setup() {
 void draw() {
   if (!USE_SIM) ensureConnected();
 
-  // 0) pokud jedeme simulaci, nasyp body do queue
+  // 0) simulace -> queue
   if (USE_SIM) generateSimPoints();
 
-  // 1) vykresli další segmenty do canvasLayer
+  // 1) kresli segmenty do canvasLayer
   int n = 0;
   if (!queue.isEmpty()) {
     canvasLayer.beginDraw();
+    canvasLayer.colorMode(HSB, 360, 100, 100, 255);
 
     while (n < segmentsPerFrame && !queue.isEmpty()) {
       PVector p = queue.removeFirst();
 
       if (havePrev) {
-        // render podle módu
         if (RENDER_MODE == 0) {
           drawLineSegment(canvasLayer, prevX, prevY, p.x, p.y);
         } else if (RENDER_MODE == 1) {
@@ -166,48 +200,48 @@ void draw() {
         } else {
           drawSandSegment(canvasLayer, prevX, prevY, p.x, p.y);
         }
-
         segmentsDrawn++;
       } else {
         havePrev = true;
       }
 
-      prevX = p.x;
-      prevY = p.y;
+      prevX = p.x; prevY = p.y;
       n++;
     }
 
     canvasLayer.endDraw();
   }
 
-  // adaptivně (když se fronta hromadí)
+  // adaptivně
   if (queue.size() > 500) segmentsPerFrame = 60;
   else if (queue.size() > 250) segmentsPerFrame = 35;
   else segmentsPerFrame = 20;
 
-  // 2) hlídání, jestli “chodí data”
+  // data watchdog
   if (!USE_SIM && status.equals("RUN") && millis() - lastDataMs > 1500) {
     status = "WAITING";
   }
 
-  // 3) log jen když debug
+  // log (jen debug)
   int now = millis();
   if (debugUI && now - lastLogMs >= 1000) {
     println(
       "LOG fps=" + nf(frameRate, 0, 1) +
       " lines/s=" + linesIn +
-      " seg/s=" + segmentsDrawn +
+      " seg/s=" + segmentsDrawn +  
       " queue=" + queue.size() +
       " seg/frame=" + segmentsPerFrame +
       " src=" + (USE_SIM ? ("SIM(mode " + SIM_MODE + ")") : ("SERIAL(" + (myPort == null ? "DISCONNECTED" : preferredPort) + ")")) +
-      " render=" + renderModeName()
+      " render=" + renderModeName() +
+      " strokeColorIdx=" + strokeColorIdx +
+      " bgIdx=" + bgIdx
     );
     linesIn = 0;
     segmentsDrawn = 0;
     lastLogMs = now;
   }
 
-  // 4) zobraz vrstvy
+  // display
   image(canvasLayer, 0, 0);
 
   if (debugUI) {
@@ -217,25 +251,72 @@ void draw() {
 }
 
 // ============================
-// RENDER: LINE (pixelová čára)
+// Palette apply helpers
+// ============================
+void applyStrokePalette() {
+  float[] c = STROKE_COLORS[strokeColorIdx];
+
+  // LINE
+  lineHue = c[0];
+  lineSat = c[1];
+  lineBri = c[2];
+
+  // BRUSH (ink) – stejné, jen jako int
+  inkHue = round(c[0]);
+  inkSat = round(c[1]);
+  inkBri = round(c[2]);
+
+  // SAND – lehce “pískovější” = menší sat, větší bri
+  sandHue = round(c[0]);
+  sandSat = round(max(12, c[1] * 0.35));
+  sandBri = round(min(95, c[2] + 55));
+}
+
+void applyBackgroundAndClear() {
+  float[] b = BG_COLORS[bgIdx];
+  canvasLayer.beginDraw();
+  canvasLayer.colorMode(HSB, 360, 100, 100, 255);
+  canvasLayer.background(b[0], b[1], b[2]);
+  canvasLayer.endDraw();
+
+  havePrev = false;
+  queue.clear();
+}
+
+// ============================
+// SPEED helpers
+// ============================
+float alphaFactorFromDist(float dist) {
+  // dist 0..SPEED_DIST_REF -> vyšší alfa, dist vyšší -> nižší alfa
+  float t = constrain(dist / SPEED_DIST_REF, 0, 2.5);
+  // t=0 => ~MAX, t=1 => ~1.0, t>1 => jde k MIN
+  float f = lerp(SPEED_ALPHA_MAX, 1.0, constrain(t, 0, 1));
+  if (t > 1) f = lerp(1.0, SPEED_ALPHA_MIN, constrain((t - 1.0) / 1.5, 0, 1));
+  return f;
+}
+
+float spacingFactorFromDist(float dist) {
+  return 1.0 + dist * SPEED_SPACING_GAIN;
+}
+
+// ============================
+// RENDER: LINE
 // ============================
 void drawLineSegment(PGraphics g, float x1, float y1, float x2, float y2) {
   float dx = x2 - x1;
   float dy = y2 - y1;
-
-  // přeskoč moc krátké segmenty -> eliminuje "sytější kroužky"
   if (dx*dx + dy*dy < MIN_LINE_SEG_PX*MIN_LINE_SEG_PX) return;
 
   g.blendMode(BLEND);
-  g.stroke(0, 0, 0, 255);       // černá v HSB
+  g.stroke(lineHue, lineSat, lineBri, 255);
   g.strokeWeight(lineWeight);
-  g.strokeCap(SQUARE);          // méně "koleček" než ROUND
+  g.strokeCap(SQUARE);
   g.noFill();
   g.line(x1, y1, x2, y2);
 }
 
 // ============================
-// RENDER: INK (stamps)
+// RENDER: BRUSH (ink)
 // ============================
 void drawInkSegment(PGraphics g, float x1, float y1, float x2, float y2) {
   if (INK_MULTIPLY) g.blendMode(MULTIPLY);
@@ -246,10 +327,14 @@ void drawInkSegment(PGraphics g, float x1, float y1, float x2, float y2) {
   float dist = sqrt(dx*dx + dy*dy);
   if (dist < 0.0001) { g.blendMode(BLEND); return; }
 
-  int steps = max(1, ceil(dist / inkSpacing));
+  float aFac = alphaFactorFromDist(dist);
+  float spFac = spacingFactorFromDist(dist);
+
+  float effectiveSpacing = inkSpacing * spFac;
+  int steps = max(1, ceil(dist / effectiveSpacing));
 
   g.noStroke();
-  g.fill(inkHue, inkSat, inkBri, inkAlpha);
+  g.fill(inkHue, inkSat, inkBri, constrain(inkAlpha * aFac, 1, 255));
 
   float jitter = 0.10 * inkBrushR;
 
@@ -264,7 +349,7 @@ void drawInkSegment(PGraphics g, float x1, float y1, float x2, float y2) {
 }
 
 // ============================
-// RENDER: SAND (grains)
+// RENDER: SAND
 // ============================
 void drawSandSegment(PGraphics g, float x1, float y1, float x2, float y2) {
   g.blendMode(BLEND);
@@ -274,17 +359,24 @@ void drawSandSegment(PGraphics g, float x1, float y1, float x2, float y2) {
   float dist = sqrt(dx*dx + dy*dy);
   if (dist < 0.0001) return;
 
-  int steps = max(1, ceil(dist / sandSpacing));
+  float aFac = alphaFactorFromDist(dist);
+  float spFac = spacingFactorFromDist(dist);
+
+  float effectiveSpacing = sandSpacing * spFac;
+  int steps = max(1, ceil(dist / effectiveSpacing));
 
   g.noStroke();
-  g.fill(sandHue, sandSat, sandBri, sandAlpha);
+  g.fill(sandHue, sandSat, sandBri, constrain(sandAlpha * aFac, 1, 255));
+
+  // rychlejší = méně zrnek
+  int grains = max(1, round(sandGrainsPerStep * lerp(1.2, 0.55, constrain(dist / SPEED_DIST_REF, 0, 1))));
 
   for (int i = 0; i <= steps; i++) {
     float t = i / (float)steps;
     float bx = lerp(x1, x2, t);
     float by = lerp(y1, y2, t);
 
-    for (int k = 0; k < sandGrainsPerStep; k++) {
+    for (int k = 0; k < grains; k++) {
       float a = random(TWO_PI);
       float r = abs((float)randomGaussian()) * sandSpread;
       float px = bx + cos(a) * r;
@@ -307,7 +399,6 @@ void generateSimPoints() {
   if (toGen <= 0) return;
 
   simCarry -= toGen;
-
   float step = 1.0 / simRateHz;
 
   float driftAccel = 0.20;
@@ -322,18 +413,14 @@ void generateSimPoints() {
     float x = 0, y = 0;
 
     if (SIM_MODE == 1) {
-      float ax = 90;
-      float ay = 70;
-      float fx = 2.0;
-      float fy = 3.0;
+      float ax = 90, ay = 70;
+      float fx = 2.0, fy = 3.0;
       float phase = PI/3;
       x = ax * sin(TWO_PI * fx * simT + phase);
       y = ay * sin(TWO_PI * fy * simT);
 
     } else if (SIM_MODE == 2) {
-      float R = 90;
-      float r = 35;
-      float d = 60;
+      float R = 90, r = 35, d = 60;
       float t = TWO_PI * 0.20 * simT;
       x = (R - r) * cos(t) + d * cos(((R - r) / r) * t);
       y = (R - r) * sin(t) - d * sin(((R - r) / r) * t);
@@ -344,10 +431,10 @@ void generateSimPoints() {
       rwY += random(-stepSize, stepSize);
       rwX = constrain(rwX, -120, 120);
       rwY = constrain(rwY, -120, 120);
-      x = rwX;
-      y = rwY;
+      x = rwX; y = rwY;
     }
 
+    // drift
     driftVX += random(-driftAccel, driftAccel) * step;
     driftVY += random(-driftAccel, driftAccel) * step;
     driftVX *= driftDamp;
@@ -365,10 +452,8 @@ void generateSimPoints() {
     float drawX = width/2 + x * scaleFactor;
     float drawY = height/2 - y * scaleFactor;
 
-    lastX = x;
-    lastY = y;
-    lastDrawX = drawX;
-    lastDrawY = drawY;
+    lastX = x; lastY = y;
+    lastDrawX = drawX; lastDrawY = drawY;
     haveXY = true;
 
     queue.addLast(new PVector(drawX, drawY));
@@ -383,10 +468,9 @@ void generateSimPoints() {
 void drawHUD() {
   hud.beginDraw();
   hud.clear();
-
   hud.noStroke();
   hud.fill(255);
-  hud.rect(10, 10, 520, 260);
+  hud.rect(10, 10, 560, 270);
 
   boolean hover = mouseX >= btnX && mouseX <= btnX+btnW && mouseY >= btnY && mouseY <= btnY+btnH;
   hud.stroke(0);
@@ -402,21 +486,20 @@ void drawHUD() {
   hud.textSize(14);
   hud.fill(0);
 
-  String srcText = USE_SIM ? ("SIM  (T=toggle, 1/2/3 mode)") : ("SERIAL (T=toggle)");
+  String srcText = USE_SIM ? ("SIM (T=toggle, 1/2/3 mode)") : ("SERIAL (T=toggle)");
   String portText = (myPort == null) ? "DISCONNECTED" : "CONNECTED";
   hud.text("Source: " + srcText, 20, 70);
-  hud.text("Serial: " + portText + "  (R=reconnect)", 20, 90);
+  hud.text("Serial: " + portText + " (R=reconnect)", 20, 90);
   hud.text("Status: " + status, 20, 110);
-  hud.text("Render: " + renderModeName() + "  (Q=line, W=brush, E=sand)", 20, 130);
+  hud.text("Q=color (" + (strokeColorIdx+1) + "/10)   W=render (" + renderModeName() + ")   E=bg (" + (bgIdx+1) + "/5)", 20, 130);
   hud.text("Queue: " + queue.size() + "   FPS: " + nf(frameRate, 0, 1), 20, 150);
 
   if (haveXY) {
-    hud.text("x:  " + nf(lastX, 0, 2) + "    y:  " + nf(lastY, 0, 2), 20, 170);
-    hud.text("px: " + nf(lastDrawX, 0, 1) + "   py: " + nf(lastDrawY, 0, 1), 20, 190);
+    hud.text("x: " + nf(lastX, 0, 2) + "   y: " + nf(lastY, 0, 2), 20, 170);
+    hud.text("px: " + nf(lastDrawX, 0, 1) + "  py: " + nf(lastDrawY, 0, 1), 20, 190);
   } else {
     hud.text("x,y: (čekám na data)", 20, 170);
   }
-
   hud.endDraw();
 }
 
@@ -450,10 +533,8 @@ void serialEvent(Serial p) {
     float drawX = width/2 + x * scaleFactor;
     float drawY = height/2 - y * scaleFactor;
 
-    lastX = x;
-    lastY = y;
-    lastDrawX = drawX;
-    lastDrawY = drawY;
+    lastX = x; lastY = y;
+    lastDrawX = drawX; lastDrawY = drawY;
     haveXY = true;
 
     queue.addLast(new PVector(drawX, drawY));
@@ -461,7 +542,6 @@ void serialEvent(Serial p) {
     if (!status.equals("CALIBRATING")) status = "RUN";
 
     linesIn++;
-
     while (queue.size() > 12000) queue.removeFirst();
 
   } catch(Exception e) {
@@ -481,10 +561,25 @@ void mousePressed() {
 void keyPressed() {
   if (key == 'd' || key == 'D') debugUI = !debugUI;
 
-  // Q/W/E => přepnutí renderu (funguje vždy: SIM i SERIAL)
-  if (key == 'q' || key == 'Q') { RENDER_MODE = 0; println("RENDER => LINE"); }
-  if (key == 'w' || key == 'W') { RENDER_MODE = 1; println("RENDER => INK"); }
-  if (key == 'e' || key == 'E') { RENDER_MODE = 2; println("RENDER => SAND"); }
+  // Q = barva (10)
+  if (key == 'q' || key == 'Q') {
+    strokeColorIdx = (strokeColorIdx + 1) % STROKE_COLORS.length;
+    applyStrokePalette();
+    println("STROKE_COLOR => " + (strokeColorIdx+1) + "/10");
+  }
+
+  // W = render mód (line/brush/sand)
+  if (key == 'w' || key == 'W') {
+    RENDER_MODE = (RENDER_MODE + 1) % 3;
+    println("RENDER_MODE => " + renderModeName());
+  }
+
+  // E = pozadí (5) + clear
+  if (key == 'e' || key == 'E') {
+    bgIdx = (bgIdx + 1) % BG_COLORS.length;
+    applyBackgroundAndClear();
+    println("BACKGROUND => " + (bgIdx+1) + "/5 (cleared)");
+  }
 
   // toggle zdroj dat
   if (key == 't' || key == 'T') {
@@ -504,11 +599,11 @@ void keyPressed() {
     }
   }
 
-  // přepnutí sim módů (teď na 1/2/3)
+  // sim módy
   if (USE_SIM) {
-    if (key == '1') { SIM_MODE = 1; println("SIM_MODE=1 (Lissajous)"); }
-    if (key == '2') { SIM_MODE = 2; println("SIM_MODE=2 (Spiro)"); }
-    if (key == '3') { SIM_MODE = 3; println("SIM_MODE=3 (Random walk)"); }
+    if (key == '1') { SIM_MODE = 1; println("SIM_MODE=1"); }
+    if (key == '2') { SIM_MODE = 2; println("SIM_MODE=2"); }
+    if (key == '3') { SIM_MODE = 3; println("SIM_MODE=3"); }
   }
 
   if (key == 'c' || key == 'C') sendCalibrate();
@@ -521,12 +616,7 @@ void keyPressed() {
   }
 
   if (key == ' ') {  // clear canvas
-    canvasLayer.beginDraw();
-    canvasLayer.background(0, 0, 100);
-    canvasLayer.endDraw();
-
-    havePrev = false;
-    queue.clear();
+    applyBackgroundAndClear();
   }
 }
 
@@ -571,7 +661,7 @@ void connectSerial() {
       return;
     }
 
-    // 1) Zkus natvrdo preferredPort (COM7 na Win, /dev/ttyACM0 na Linux)
+    // 1) preferovaný port
     if (preferredPort != null && preferredPort.length() > 0) {
       for (String p : ports) {
         if (p.equals(preferredPort)) {
@@ -586,7 +676,7 @@ void connectSerial() {
 
     String os = System.getProperty("os.name").toLowerCase();
 
-    // 2) Linux/RPi fallback: ttyACM*, pak ttyUSB*, pak cokoliv
+    // 2) Linux/RPi fallback
     if (os.contains("linux")) {
       for (String p : ports) {
         if (p.indexOf("ttyACM") >= 0) {
@@ -610,7 +700,7 @@ void connectSerial() {
       }
     }
 
-    // 3) Windows fallback: první COM*, pak cokoliv
+    // 3) Windows fallback
     if (os.contains("win")) {
       for (String p : ports) {
         if (p.startsWith("COM")) {
@@ -624,7 +714,7 @@ void connectSerial() {
       }
     }
 
-    // 4) Poslední fallback: první port
+    // 4) last resort
     preferredPort = ports[0];
     myPort = new Serial(this, ports[0], baud);
     myPort.bufferUntil('\n');
