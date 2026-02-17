@@ -1,5 +1,6 @@
 import processing.serial.*;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 
 Serial myPort;
 
@@ -18,12 +19,17 @@ int baud = 115200;
 String defaultPreferredPort() {
   String os = System.getProperty("os.name").toLowerCase();
   if (os.contains("win")) return "COM7";
-  if (os.contains("linux")) return "/dev/ttyACM0";
+
+  // Na Linux/RPi se po replug může změnit ttyACM0/1 a navíc v listu bývá /dev/serial0 (UART) který je často BUSY.
+  // Necháme to prázdné a budeme vybírat robustně v connectSerial().
+  if (os.contains("linux")) return "";
+
   return "";
 }
 
 int reconnectEveryMs = 2000;
 int lastReconnectTryMs = 0;
+
 // když je port objekt pořád "živý", ale data netečou (po odpojení USB),
 // tak ho po timeoutu shodíme a necháme ensureConnected() znovu připojit
 int noDataDisconnectMs = 1200;  // po kolika ms bez dat udělat disconnect
@@ -99,9 +105,8 @@ float [][] STROKE_COLORS = {
   {270, 85, 80},  // 6: PURPLE   (BLUE + RED)
 
   { 25, 70, 45},  // 7: BROWN    (RED + YELLOW + BLUE) ~ “pigment mix”
-  {  0,  0, 100}   // 8: WHITE (hodí se třeba pro pozadí / speciální režimy)
+  {  0,  0, 100}   // 8: WHITE
 };
-
 
 int strokeColorIdx = 1;
 
@@ -229,16 +234,15 @@ void draw() {
     int now = millis();
     boolean inGrace = (now - lastConnectMs) < connectGraceMs;
     boolean timedOut = (now - lastDataMs) > noDataDisconnectMs;
-  
+
     if (!inGrace && timedOut) {
       println("No data for " + (now - lastDataMs) + "ms -> disconnect & auto-reconnect");
       disconnectSerial();
-      status = "ERROR"; // nebo "WAITING" pokud nechceš červený stav
+      status = "ERROR"; // nebo "WAITING"
     }
   }
 
-
-  // data watchdog
+  // data watchdog (jen vizuální stav)
   if (!USE_SIM && status.equals("RUN") && millis() - lastDataMs > 1500) {
     status = "WAITING";
   }
@@ -249,7 +253,7 @@ void draw() {
     println(
       "LOG fps=" + nf(frameRate, 0, 1) +
       " lines/s=" + linesIn +
-      " seg/s=" + segmentsDrawn +  
+      " seg/s=" + segmentsDrawn +
       " queue=" + queue.size() +
       " seg/frame=" + segmentsPerFrame +
       " src=" + (USE_SIM ? ("SIM(mode " + SIM_MODE + ")") : ("SERIAL(" + (myPort == null ? "DISCONNECTED" : preferredPort) + ")")) +
@@ -308,9 +312,7 @@ void applyBackgroundAndClear() {
 // SPEED helpers
 // ============================
 float alphaFactorFromDist(float dist) {
-  // dist 0..SPEED_DIST_REF -> vyšší alfa, dist vyšší -> nižší alfa
   float t = constrain(dist / SPEED_DIST_REF, 0, 2.5);
-  // t=0 => ~MAX, t=1 => ~1.0, t>1 => jde k MIN
   float f = lerp(SPEED_ALPHA_MAX, 1.0, constrain(t, 0, 1));
   if (t > 1) f = lerp(1.0, SPEED_ALPHA_MIN, constrain((t - 1.0) / 1.5, 0, 1));
   return f;
@@ -389,7 +391,6 @@ void drawSandSegment(PGraphics g, float x1, float y1, float x2, float y2) {
   g.noStroke();
   g.fill(sandHue, sandSat, sandBri, constrain(sandAlpha * aFac, 1, 255));
 
-  // rychlejší = méně zrnek
   int grains = max(1, round(sandGrainsPerStep * lerp(1.2, 0.55, constrain(dist / SPEED_DIST_REF, 0, 1))));
 
   for (int i = 0; i <= steps; i++) {
@@ -536,11 +537,12 @@ void serialEvent(Serial p) {
 
     line = trim(line);
     if (line.length() == 0) return;
-    
+
+    // cokoliv přišlo ze serialu = link žije (i OK/ERR/CALIB hlášky)
     lastDataMs = millis();
 
     if (line.equals("CALIB_START")) { status = "CALIBRATING"; return; }
-    if (line.equals("CALIB_OK"))    { status = "RUN"; lastDataMs = millis(); return; }
+    if (line.equals("CALIB_OK"))    { status = "RUN"; return; }
 
     if (line.equals("x,y")) return;
     if (line.startsWith("OK,")) return;
@@ -561,7 +563,6 @@ void serialEvent(Serial p) {
     haveXY = true;
 
     queue.addLast(new PVector(drawX, drawY));
-    lastDataMs = millis();
     if (!status.equals("CALIBRATING")) status = "RUN";
 
     linesIn++;
@@ -584,27 +585,23 @@ void mousePressed() {
 void keyPressed() {
   if (key == 'd' || key == 'D') debugUI = !debugUI;
 
-  // Q = barva (10)
   if (key == 'q' || key == 'Q') {
     strokeColorIdx = (strokeColorIdx + 1) % STROKE_COLORS.length;
     applyStrokePalette();
     println("STROKE_COLOR => " + (strokeColorIdx+1) + "/10");
   }
 
-  // W = render mód (line/brush/sand)
   if (key == 'w' || key == 'W') {
     RENDER_MODE = (RENDER_MODE + 1) % 3;
     println("RENDER_MODE => " + renderModeName());
   }
 
-  // E = pozadí (5) + clear
   if (key == 'e' || key == 'E') {
     bgIdx = (bgIdx + 1) % BG_COLORS.length;
     applyBackgroundAndClear();
     println("BACKGROUND => " + (bgIdx+1) + "/5 (cleared)");
   }
 
-  // toggle zdroj dat
   if (key == 't' || key == 'T') {
     USE_SIM = !USE_SIM;
     println("TOGGLE source => " + (USE_SIM ? "SIM" : "SERIAL"));
@@ -622,7 +619,6 @@ void keyPressed() {
     }
   }
 
-  // sim módy
   if (USE_SIM) {
     if (key == '1') { SIM_MODE = 1; println("SIM_MODE=1"); }
     if (key == '2') { SIM_MODE = 2; println("SIM_MODE=2"); }
@@ -638,7 +634,7 @@ void keyPressed() {
     }
   }
 
-  if (key == ' ') {  // clear canvas
+  if (key == ' ') {
     applyBackgroundAndClear();
   }
 }
@@ -666,9 +662,24 @@ void ensureConnected() {
 
 void disconnectSerial() {
   try {
-    if (myPort != null) myPort.stop();
+    if (myPort != null) {
+      myPort.clear();
+      myPort.stop();
+    }
   } catch(Exception e) {}
   myPort = null;
+}
+
+// Helpers pro filtraci portů na Linuxu
+boolean isBadLinuxPort(String p) {
+  if (p == null) return true;
+  // systémové UART aliasy na RPi
+  if (p.equals("/dev/serial0") || p.equals("/dev/serial1")) return true;
+  // často UART device names
+  if (p.indexOf("ttyAMA") >= 0) return true;
+  // BT serial
+  if (p.indexOf("rfcomm") >= 0) return true;
+  return false;
 }
 
 void connectSerial() {
@@ -684,9 +695,26 @@ void connectSerial() {
       return;
     }
 
-    // 1) preferovaný port
+    String os = System.getProperty("os.name").toLowerCase();
+
+    // připrav kandidáty (hlavně pro Linux filtr)
+    ArrayList<String> candidates = new ArrayList<String>();
+    for (String p : ports) {
+      if (os.contains("linux") && isBadLinuxPort(p)) continue;
+      candidates.add(p);
+    }
+    String[] candArr = candidates.toArray(new String[0]);
+    println("Candidates: " + join(candArr, ", "));
+
+    if (candArr.length == 0) {
+      println("No suitable serial ports after filtering.");
+      status = "ERROR";
+      return;
+    }
+
+    // 1) preferovaný port (pokud je rozumný)
     if (preferredPort != null && preferredPort.length() > 0) {
-      for (String p : ports) {
+      for (String p : candArr) {
         if (p.equals(preferredPort)) {
           myPort = new Serial(this, p, baud);
           myPort.bufferUntil('\n');
@@ -698,11 +726,20 @@ void connectSerial() {
       }
     }
 
-    String os = System.getProperty("os.name").toLowerCase();
-
-    // 2) Linux/RPi fallback
+    // 2) Linux/RPi: preferuj /dev/serial/by-id (stabilní), pak ttyACM, pak ttyUSB
     if (os.contains("linux")) {
-      for (String p : ports) {
+      for (String p : candArr) {
+        if (p.indexOf("/dev/serial/by-id/") >= 0) {
+          preferredPort = p;
+          myPort = new Serial(this, p, baud);
+          myPort.bufferUntil('\n');
+          println("Connected (by-id) to " + p);
+          lastConnectMs = millis();
+          status = "WAITING";
+          return;
+        }
+      }
+      for (String p : candArr) {
         if (p.indexOf("ttyACM") >= 0) {
           preferredPort = p;
           myPort = new Serial(this, p, baud);
@@ -713,7 +750,7 @@ void connectSerial() {
           return;
         }
       }
-      for (String p : ports) {
+      for (String p : candArr) {
         if (p.indexOf("ttyUSB") >= 0) {
           preferredPort = p;
           myPort = new Serial(this, p, baud);
@@ -724,11 +761,15 @@ void connectSerial() {
           return;
         }
       }
+
+      println("No ttyACM/ttyUSB/by-id device found. (Not using /dev/serial0)");
+      status = "ERROR";
+      return;
     }
 
     // 3) Windows fallback
     if (os.contains("win")) {
-      for (String p : ports) {
+      for (String p : candArr) {
         if (p.startsWith("COM")) {
           preferredPort = p;
           myPort = new Serial(this, p, baud);
@@ -741,13 +782,9 @@ void connectSerial() {
       }
     }
 
-    // 4) last resort
-    preferredPort = ports[0];
-    myPort = new Serial(this, ports[0], baud);
-    myPort.bufferUntil('\n');
-    println("Connected (last resort) to " + ports[0]);
-    lastConnectMs = millis();
-    status = "WAITING";
+    // 4) Na ostatních OS už žádný "last resort" nebudeme dělat (může trefit blbý port)
+    println("No suitable serial port found.");
+    status = "ERROR";
 
   } catch(Exception e) {
     println("Connect failed: " + e);
