@@ -24,6 +24,12 @@ String defaultPreferredPort() {
 
 int reconnectEveryMs = 2000;
 int lastReconnectTryMs = 0;
+// když je port objekt pořád "živý", ale data netečou (po odpojení USB),
+// tak ho po timeoutu shodíme a necháme ensureConnected() znovu připojit
+int noDataDisconnectMs = 1200;  // po kolika ms bez dat udělat disconnect
+int connectGraceMs = 2500;      // grace po connectu (aby se to hned neshodilo)
+int lastConnectMs = 0;
+
 
 // ---- kreslení ----
 float scaleFactor = 3.0;
@@ -216,6 +222,21 @@ void draw() {
   if (queue.size() > 500) segmentsPerFrame = 60;
   else if (queue.size() > 250) segmentsPerFrame = 35;
   else segmentsPerFrame = 20;
+
+  // hard watchdog: po odpojení USB myPort často zůstane != null,
+  // ale data už netečou -> po timeoutu udělej disconnect, aby se spustil auto-reconnect
+  if (!USE_SIM && myPort != null) {
+    int now = millis();
+    boolean inGrace = (now - lastConnectMs) < connectGraceMs;
+    boolean timedOut = (now - lastDataMs) > noDataDisconnectMs;
+  
+    if (!inGrace && timedOut) {
+      println("No data for " + (now - lastDataMs) + "ms -> disconnect & auto-reconnect");
+      disconnectSerial();
+      status = "ERROR"; // nebo "WAITING" pokud nechceš červený stav
+    }
+  }
+
 
   // data watchdog
   if (!USE_SIM && status.equals("RUN") && millis() - lastDataMs > 1500) {
@@ -515,6 +536,8 @@ void serialEvent(Serial p) {
 
     line = trim(line);
     if (line.length() == 0) return;
+    
+    lastDataMs = millis();
 
     if (line.equals("CALIB_START")) { status = "CALIBRATING"; return; }
     if (line.equals("CALIB_OK"))    { status = "RUN"; lastDataMs = millis(); return; }
@@ -668,6 +691,7 @@ void connectSerial() {
           myPort = new Serial(this, p, baud);
           myPort.bufferUntil('\n');
           println("Connected to " + p);
+          lastConnectMs = millis();
           status = "WAITING";
           return;
         }
@@ -684,6 +708,7 @@ void connectSerial() {
           myPort = new Serial(this, p, baud);
           myPort.bufferUntil('\n');
           println("Connected (fallback ttyACM) to " + p);
+          lastConnectMs = millis();
           status = "WAITING";
           return;
         }
@@ -694,6 +719,7 @@ void connectSerial() {
           myPort = new Serial(this, p, baud);
           myPort.bufferUntil('\n');
           println("Connected (fallback ttyUSB) to " + p);
+          lastConnectMs = millis();
           status = "WAITING";
           return;
         }
@@ -708,6 +734,7 @@ void connectSerial() {
           myPort = new Serial(this, p, baud);
           myPort.bufferUntil('\n');
           println("Connected (fallback COM) to " + p);
+          lastConnectMs = millis();
           status = "WAITING";
           return;
         }
@@ -719,6 +746,7 @@ void connectSerial() {
     myPort = new Serial(this, ports[0], baud);
     myPort.bufferUntil('\n');
     println("Connected (last resort) to " + ports[0]);
+    lastConnectMs = millis();
     status = "WAITING";
 
   } catch(Exception e) {
