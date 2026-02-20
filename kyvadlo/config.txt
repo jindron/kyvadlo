@@ -1,0 +1,5 @@
+# Kyvadlo config
+scaleFactor=300,000
+bgIdx=0
+strokeColorIdx=1
+renderMode=1

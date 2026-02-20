@@ -5,12 +5,25 @@ import java.util.ArrayList;
 Serial myPort;
 
 // ============================
+// CONFIG (saved to sketch folder)
+// ============================
+final String CFG_FILE = "config.txt";
+
+// ============================
 // SIMULATION toggle
 // ============================
-boolean USE_SIM = false;          // <-- false = ESP, true = simulace
+boolean USE_SIM = false;          // false = ESP, true = simulace
 int SIM_MODE = 1;                 // 1=Lissajous, 2=Spiro, 3=Random walk
+
+// SIM hodnoty chceme v "unit" rozsahu jako ESP (cca -1..1)
+float SIM_GAIN = 0.008;   // 90 * 0.008 = 0.72  (rozumné)
 float simRateHz = 200;
 int simPointsPerFrameMax = 12;
+
+// SIM vykreslování VŽDY cca 300x300 px (nezávislé na scaleFactor)
+float simScalePx = 150.0;          // poloměr 150px => obrazec ~300x300
+float SIM_UNIT_CLAMP = 1.2;        // pojistka (clamp unit)
+
 
 // ---- Serial / reconnect ----
 String preferredPort = defaultPreferredPort();
@@ -36,9 +49,14 @@ int noDataDisconnectMs = 1200;  // po kolika ms bez dat udělat disconnect
 int connectGraceMs = 2500;      // grace po connectu (aby se to hned neshodilo)
 int lastConnectMs = 0;
 
+// SCALE pro ESP (reálná data) – ovládáš H/J/K/L
+float scaleFactor = 300;
+float SCALE_STEP_FINE = 1.0;   // H/J
+float SCALE_STEP_SUPER = 0.1;  // K/L
+float SCALE_MIN = 10;
+float SCALE_MAX = 5000;
 
 // ---- kreslení ----
-float scaleFactor = 3.0;
 boolean havePrev = false;
 float prevX, prevY;
 ArrayDeque<PVector> queue = new ArrayDeque<PVector>();
@@ -58,9 +76,6 @@ boolean debugUI = false;
 PGraphics canvasLayer;  // stopa
 PGraphics hud;          // debug overlay
 
-// tlačítko (viditelné jen v debug)
-int btnX = 20, btnY = 20, btnW = 170, btnH = 44;
-
 // ---- logging ----
 int linesIn = 0;
 int segmentsDrawn = 0;
@@ -73,7 +88,7 @@ float simT = 0;
 float simCarry = 0;
 float rwX = 0, rwY = 0;
 
-// drift (aby se to v SIM tolik nepřekrývalo)
+// drift (aby se to v SIM tolik nepřekrývalo) – v UNIT měřítku!
 float driftX = 0, driftY = 0;
 float driftVX = 0, driftVY = 0;
 
@@ -91,8 +106,6 @@ String renderModeName() {
 // ============================
 // PALETTES
 // ============================
-// 10 barev stopy (HSB: hue,sat,bri)
-
 // HSB palette: {H, S, B}  (H:0-360, S:0-100, B:0-100)
 float [][] STROKE_COLORS = {
   {  0,  0,  0},  // 0: BLACK
@@ -100,11 +113,11 @@ float [][] STROKE_COLORS = {
   { 60, 90, 95},  // 2: YELLOW
   {220, 90, 85},  // 3: BLUE
 
-  { 30, 90, 92},  // 4: ORANGE   (RED + YELLOW)
-  {120, 90, 80},  // 5: GREEN    (YELLOW + BLUE)
-  {270, 85, 80},  // 6: PURPLE   (BLUE + RED)
+  { 30, 90, 92},  // 4: ORANGE
+  {120, 90, 80},  // 5: GREEN
+  {270, 85, 80},  // 6: PURPLE
 
-  { 25, 70, 45},  // 7: BROWN    (RED + YELLOW + BLUE) ~ “pigment mix”
+  { 25, 70, 45},  // 7: BROWN
   {  0,  0, 100}   // 8: WHITE
 };
 
@@ -153,16 +166,18 @@ float MIN_LINE_SEG_PX = 0.8;
 
 // ============================
 // “rychlejší pohyb = světlejší/řidší”
-// (dist = délka segmentu v px)
 // ============================
-float SPEED_DIST_REF = 18.0;      // kolem téhle délky už se to výrazně zesvětluje
-float SPEED_ALPHA_MIN = 0.30;     // min násobek alfy (rychlé = ~0.3x)
-float SPEED_ALPHA_MAX = 1.25;     // max násobek alfy (pomalé = ~1.25x)
-float SPEED_SPACING_GAIN = 0.05;  // rychlé = větší rozestupy stampů
+float SPEED_DIST_REF = 18.0;
+float SPEED_ALPHA_MIN = 0.30;
+float SPEED_ALPHA_MAX = 1.25;
+float SPEED_SPACING_GAIN = 0.05;
 
 void setup() {
-  size(800, 800); // pro fullscreen dej fullScreen() nebo fullScreen(2)
+  size(800, 800);
   smooth();
+
+  // načti config dřív, než začneš kreslit
+  loadConfig();
 
   canvasLayer = createGraphics(width, height);
   hud = createGraphics(width, height);
@@ -173,7 +188,6 @@ void setup() {
   canvasLayer.background(BG_COLORS[bgIdx][0], BG_COLORS[bgIdx][1], BG_COLORS[bgIdx][2]);
   canvasLayer.endDraw();
 
-  // nastav výchozí barvy stopy podle palety
   applyStrokePalette();
 
   if (!USE_SIM) {
@@ -191,10 +205,8 @@ void setup() {
 void draw() {
   if (!USE_SIM) ensureConnected();
 
-  // 0) simulace -> queue
   if (USE_SIM) generateSimPoints();
 
-  // 1) kresli segmenty do canvasLayer
   int n = 0;
   if (!queue.isEmpty()) {
     canvasLayer.beginDraw();
@@ -223,13 +235,10 @@ void draw() {
     canvasLayer.endDraw();
   }
 
-  // adaptivně
   if (queue.size() > 500) segmentsPerFrame = 60;
   else if (queue.size() > 250) segmentsPerFrame = 35;
   else segmentsPerFrame = 20;
 
-  // hard watchdog: po odpojení USB myPort často zůstane != null,
-  // ale data už netečou -> po timeoutu udělej disconnect, aby se spustil auto-reconnect
   if (!USE_SIM && myPort != null) {
     int now = millis();
     boolean inGrace = (now - lastConnectMs) < connectGraceMs;
@@ -238,16 +247,14 @@ void draw() {
     if (!inGrace && timedOut) {
       println("No data for " + (now - lastDataMs) + "ms -> disconnect & auto-reconnect");
       disconnectSerial();
-      status = "ERROR"; // nebo "WAITING"
+      status = "ERROR";
     }
   }
 
-  // data watchdog (jen vizuální stav)
   if (!USE_SIM && status.equals("RUN") && millis() - lastDataMs > 1500) {
     status = "WAITING";
   }
 
-  // log (jen debug)
   int now = millis();
   if (debugUI && now - lastLogMs >= 1000) {
     println(
@@ -259,14 +266,15 @@ void draw() {
       " src=" + (USE_SIM ? ("SIM(mode " + SIM_MODE + ")") : ("SERIAL(" + (myPort == null ? "DISCONNECTED" : preferredPort) + ")")) +
       " render=" + renderModeName() +
       " strokeColorIdx=" + strokeColorIdx +
-      " bgIdx=" + bgIdx
+      " bgIdx=" + bgIdx +
+      " scale=" + nf(scaleFactor, 0, 2) +
+      (USE_SIM ? (" simPx=" + nf(simScalePx, 0, 0) + " gain=" + nf(SIM_GAIN, 0, 4)) : "")
     );
     linesIn = 0;
     segmentsDrawn = 0;
     lastLogMs = now;
   }
 
-  // display
   image(canvasLayer, 0, 0);
 
   if (debugUI) {
@@ -276,22 +284,83 @@ void draw() {
 }
 
 // ============================
+// CONFIG load/save
+// ============================
+void loadConfig() {
+  try {
+    String[] lines = loadStrings(CFG_FILE);
+    if (lines == null) {
+      println("Config: none (using defaults)");
+      return;
+    }
+    for (String s : lines) {
+      if (s == null) continue;
+      s = trim(s);
+      if (s.length() == 0) continue;
+      if (s.startsWith("#")) continue;
+
+      int eq = s.indexOf('=');
+      if (eq <= 0) continue;
+
+      String k = trim(s.substring(0, eq));
+      String v = trim(s.substring(eq + 1));
+
+      if (k.equalsIgnoreCase("scaleFactor")) {
+        float val = float(v);
+        if (!Float.isNaN(val) && val > 0) scaleFactor = val;
+      } else if (k.equalsIgnoreCase("bgIdx")) {
+        int val = int(v);
+        if (val >= 0 && val < BG_COLORS.length) bgIdx = val;
+      } else if (k.equalsIgnoreCase("strokeColorIdx")) {
+        int val = int(v);
+        if (val >= 0 && val < STROKE_COLORS.length) strokeColorIdx = val;
+      } else if (k.equalsIgnoreCase("renderMode")) {
+        int val = int(v);
+        if (val >= 0 && val <= 2) RENDER_MODE = val;
+      }
+    }
+    println("Config loaded: scaleFactor=" + scaleFactor + " bgIdx=" + bgIdx + " strokeColorIdx=" + strokeColorIdx + " renderMode=" + RENDER_MODE);
+  } catch(Exception e) {
+    println("Config load failed: " + e);
+  }
+}
+
+void saveConfig() {
+  try {
+    String[] out = new String[] {
+      "# Kyvadlo config",
+      "scaleFactor=" + nf(scaleFactor, 0, 3),
+      "bgIdx=" + bgIdx,
+      "strokeColorIdx=" + strokeColorIdx,
+      "renderMode=" + RENDER_MODE
+    };
+    saveStrings(CFG_FILE, out);
+    println("Config saved -> " + CFG_FILE);
+  } catch(Exception e) {
+    println("Config save failed: " + e);
+  }
+}
+
+void autoFitScale() {
+  // "rozumný" poloměr ~40% menší strany okna
+  scaleFactor = min(width, height) * 0.40;
+  println("Auto-fit scaleFactor=" + nf(scaleFactor, 0, 1));
+}
+
+// ============================
 // Palette apply helpers
 // ============================
 void applyStrokePalette() {
   float[] c = STROKE_COLORS[strokeColorIdx];
 
-  // LINE
   lineHue = c[0];
   lineSat = c[1];
   lineBri = c[2];
 
-  // BRUSH (ink) – stejné, jen jako int
   inkHue = round(c[0]);
   inkSat = round(c[1]);
   inkBri = round(c[2]);
 
-  // SAND – lehce “pískovější” = menší sat, větší bri
   sandHue = round(c[0]);
   sandSat = round(max(12, c[1] * 0.35));
   sandBri = round(min(95, c[2] + 55));
@@ -423,11 +492,12 @@ void generateSimPoints() {
   simCarry -= toGen;
   float step = 1.0 / simRateHz;
 
-  float driftAccel = 0.20;
+  // drift/noise v UNIT měřítku (ne px)
+  float driftAccel = 0.010;
   float driftDamp  = 0.995;
-  float driftMaxV  = 12.0;
-  float driftMaxR  = 140.0;
-  float noiseAmp = 0.8;
+  float driftMaxV  = 0.06;
+  float driftMaxR  = 0.20;
+  float noiseAmp   = 0.004;
 
   for (int i = 0; i < toGen; i++) {
     simT += step;
@@ -456,7 +526,11 @@ void generateSimPoints() {
       x = rwX; y = rwY;
     }
 
-    // drift
+    // převod SIM -> unit
+    x *= SIM_GAIN;
+    y *= SIM_GAIN;
+
+    // drift (unit)
     driftVX += random(-driftAccel, driftAccel) * step;
     driftVY += random(-driftAccel, driftAccel) * step;
     driftVX *= driftDamp;
@@ -471,8 +545,13 @@ void generateSimPoints() {
     x += driftX + random(-noiseAmp, noiseAmp);
     y += driftY + random(-noiseAmp, noiseAmp);
 
-    float drawX = width/2 + x * scaleFactor;
-    float drawY = height/2 - y * scaleFactor;
+    // pojistka aby to neuteklo (unit)
+    x = constrain(x, -SIM_UNIT_CLAMP, SIM_UNIT_CLAMP);
+    y = constrain(y, -SIM_UNIT_CLAMP, SIM_UNIT_CLAMP);
+
+    // !!! SIM kreslíme přes simScalePx (cca 300x300), NE přes scaleFactor !!!
+    float drawX = width/2 + x * simScalePx;
+    float drawY = height/2 - y * simScalePx;
 
     lastX = x; lastY = y;
     lastDrawX = drawX; lastDrawY = drawY;
@@ -490,38 +569,52 @@ void generateSimPoints() {
 void drawHUD() {
   hud.beginDraw();
   hud.clear();
-  hud.noStroke();
-  hud.fill(255);
-  hud.rect(10, 10, 560, 270);
-
-  boolean hover = mouseX >= btnX && mouseX <= btnX+btnW && mouseY >= btnY && mouseY <= btnY+btnH;
-  hud.stroke(0);
-  hud.fill(hover ? 230 : 245);
-  hud.rect(btnX, btnY, btnW, btnH, 10);
-
-  hud.fill(0);
-  hud.textAlign(CENTER, CENTER);
-  hud.textSize(16);
-  hud.text("CALIBRATE (C)", btnX + btnW/2, btnY + btnH/2);
-
   hud.textAlign(LEFT, TOP);
-  hud.textSize(14);
-  hud.fill(0);
+  hud.textSize(12);
 
-  String srcText = USE_SIM ? ("SIM (T=toggle, 1/2/3 mode)") : ("SERIAL (T=toggle)");
-  String portText = (myPort == null) ? "DISCONNECTED" : "CONNECTED";
-  hud.text("Source: " + srcText, 20, 70);
-  hud.text("Serial: " + portText + " (R=reconnect)", 20, 90);
-  hud.text("Status: " + status, 20, 110);
-  hud.text("Q=color (" + (strokeColorIdx+1) + "/10)   W=render (" + renderModeName() + ")   E=bg (" + (bgIdx+1) + "/5)", 20, 130);
-  hud.text("Queue: " + queue.size() + "   FPS: " + nf(frameRate, 0, 1), 20, 150);
+  hud.noStroke();
+  hud.fill(0, 0, 0, 120);
+  hud.rect(0, 0, width, debugUI ? 70 : 22);
 
-  if (haveXY) {
-    hud.text("x: " + nf(lastX, 0, 2) + "   y: " + nf(lastY, 0, 2), 20, 170);
-    hud.text("px: " + nf(lastDrawX, 0, 1) + "  py: " + nf(lastDrawY, 0, 1), 20, 190);
-  } else {
-    hud.text("x,y: (čekám na data)", 20, 170);
+  hud.fill(255);
+  String srcText = USE_SIM ? ("SIM " + SIM_MODE) : "SERIAL";
+  String portText = (myPort == null) ? "DISCONNECTED" : ("OK " + preferredPort);
+
+  String xyText = haveXY
+    ? ("x=" + nf(lastX, 0, 2) + " y=" + nf(lastY, 0, 2))
+    : "x,y=...";
+
+  String line1 =
+    "SRC:" + srcText +
+    " | " + portText +
+    " | ST:" + status +
+    " | scale:" + nf(scaleFactor, 0, 2) +
+    (USE_SIM ? (" | simPx:" + nf(simScalePx, 0, 0) + " gain:" + nf(SIM_GAIN, 0, 4)) : "") +
+    " | render:" + renderModeName() +
+    " | col:" + (strokeColorIdx+1) + "/" + STROKE_COLORS.length +
+    " | bg:" + (bgIdx+1) + "/" + BG_COLORS.length;
+
+  hud.text(line1, 10, 4);
+
+  if (debugUI) {
+    String line2 =
+      "FPS:" + nf(frameRate, 0, 1) +
+      " | queue:" + queue.size() +
+      " | seg/frame:" + segmentsPerFrame +
+      " | " + xyText +
+      " | px=" + nf(lastDrawX, 0, 1) + " py=" + nf(lastDrawY, 0, 1);
+
+    hud.text(line2, 10, 22);
+
+    String help1 =
+      "Keys: D debug | T SIM/SERIAL | 1/2/3 sim mode | Q color | W render | E bg+clear | SPACE clear";
+    String help2 =
+      "Scale(ESP): H/J +/-1  K/L +/-0.1 | 0 autofit | S save cfg | C calibrate | R reconnect";
+
+    hud.text(help1, 10, 40);
+    hud.text(help2, 10, 56);
   }
+
   hud.endDraw();
 }
 
@@ -538,7 +631,6 @@ void serialEvent(Serial p) {
     line = trim(line);
     if (line.length() == 0) return;
 
-    // cokoliv přišlo ze serialu = link žije (i OK/ERR/CALIB hlášky)
     lastDataMs = millis();
 
     if (line.equals("CALIB_START")) { status = "CALIBRATING"; return; }
@@ -555,6 +647,7 @@ void serialEvent(Serial p) {
     float x = float(parts[0]);
     float y = float(parts[1]);
 
+    // ESP data používají scaleFactor (ladíš H/J/K/L)
     float drawX = width/2 + x * scaleFactor;
     float drawY = height/2 - y * scaleFactor;
 
@@ -575,20 +668,38 @@ void serialEvent(Serial p) {
   }
 }
 
-void mousePressed() {
-  if (!debugUI) return;
-  if (mouseX >= btnX && mouseX <= btnX+btnW && mouseY >= btnY && mouseY <= btnY+btnH) {
-    sendCalibrate();
-  }
-}
-
 void keyPressed() {
   if (key == 'd' || key == 'D') debugUI = !debugUI;
+
+  // --- SCALE controls (ESP) ---
+  if (key == 'h' || key == 'H') {
+    scaleFactor -= SCALE_STEP_FINE;
+    scaleFactor = constrain(scaleFactor, SCALE_MIN, SCALE_MAX);
+    println("Scale => " + nf(scaleFactor, 0, 3));
+  }
+  if (key == 'j' || key == 'J') {
+    scaleFactor += SCALE_STEP_FINE;
+    scaleFactor = constrain(scaleFactor, SCALE_MIN, SCALE_MAX);
+    println("Scale => " + nf(scaleFactor, 0, 3));
+  }
+  if (key == 'k' || key == 'K') {
+    scaleFactor -= SCALE_STEP_SUPER;
+    scaleFactor = constrain(scaleFactor, SCALE_MIN, SCALE_MAX);
+    println("Scale => " + nf(scaleFactor, 0, 3));
+  }
+  if (key == 'l' || key == 'L') {
+    scaleFactor += SCALE_STEP_SUPER;
+    scaleFactor = constrain(scaleFactor, SCALE_MIN, SCALE_MAX);
+    println("Scale => " + nf(scaleFactor, 0, 3));
+  }
+
+  if (key == '0') autoFitScale();
+  if (key == 's' || key == 'S') saveConfig();
 
   if (key == 'q' || key == 'Q') {
     strokeColorIdx = (strokeColorIdx + 1) % STROKE_COLORS.length;
     applyStrokePalette();
-    println("STROKE_COLOR => " + (strokeColorIdx+1) + "/10");
+    println("STROKE_COLOR => " + (strokeColorIdx+1) + "/" + STROKE_COLORS.length);
   }
 
   if (key == 'w' || key == 'W') {
@@ -599,7 +710,7 @@ void keyPressed() {
   if (key == 'e' || key == 'E') {
     bgIdx = (bgIdx + 1) % BG_COLORS.length;
     applyBackgroundAndClear();
-    println("BACKGROUND => " + (bgIdx+1) + "/5 (cleared)");
+    println("BACKGROUND => " + (bgIdx+1) + "/" + BG_COLORS.length + " (cleared)");
   }
 
   if (key == 't' || key == 'T') {
@@ -634,9 +745,7 @@ void keyPressed() {
     }
   }
 
-  if (key == ' ') {
-    applyBackgroundAndClear();
-  }
+  if (key == ' ') applyBackgroundAndClear();
 }
 
 void sendCalibrate() {
@@ -673,11 +782,8 @@ void disconnectSerial() {
 // Helpers pro filtraci portů na Linuxu
 boolean isBadLinuxPort(String p) {
   if (p == null) return true;
-  // systémové UART aliasy na RPi
   if (p.equals("/dev/serial0") || p.equals("/dev/serial1")) return true;
-  // často UART device names
   if (p.indexOf("ttyAMA") >= 0) return true;
-  // BT serial
   if (p.indexOf("rfcomm") >= 0) return true;
   return false;
 }
@@ -697,7 +803,6 @@ void connectSerial() {
 
     String os = System.getProperty("os.name").toLowerCase();
 
-    // připrav kandidáty (hlavně pro Linux filtr)
     ArrayList<String> candidates = new ArrayList<String>();
     for (String p : ports) {
       if (os.contains("linux") && isBadLinuxPort(p)) continue;
@@ -712,7 +817,6 @@ void connectSerial() {
       return;
     }
 
-    // 1) preferovaný port (pokud je rozumný)
     if (preferredPort != null && preferredPort.length() > 0) {
       for (String p : candArr) {
         if (p.equals(preferredPort)) {
@@ -726,7 +830,6 @@ void connectSerial() {
       }
     }
 
-    // 2) Linux/RPi: preferuj /dev/serial/by-id (stabilní), pak ttyACM, pak ttyUSB
     if (os.contains("linux")) {
       for (String p : candArr) {
         if (p.indexOf("/dev/serial/by-id/") >= 0) {
@@ -767,7 +870,6 @@ void connectSerial() {
       return;
     }
 
-    // 3) Windows fallback
     if (os.contains("win")) {
       for (String p : candArr) {
         if (p.startsWith("COM")) {
@@ -782,7 +884,6 @@ void connectSerial() {
       }
     }
 
-    // 4) Na ostatních OS už žádný "last resort" nebudeme dělat (může trefit blbý port)
     println("No suitable serial port found.");
     status = "ERROR";
 
