@@ -10,6 +10,52 @@ Serial myPort;
 final String CFG_FILE = "config.txt";
 
 // ============================
+// ORIENTATION (rotation + mirror + fine rotate)  (applies to SERIAL + SIM)
+// ============================
+int ORIENT_ROT = 0;             // 0,1,2,3 => 0°,90°,180°,270°
+boolean ORIENT_FLIP_X = false;  // mirror X (left/right)
+boolean ORIENT_FLIP_Y = false;  // mirror Y (up/down)
+
+// jemná rotace v deg (typicky +/- pár stupňů)
+float ORIENT_FINE_DEG = 0.0;     // plynulé doladění
+float ORIENT_FINE_STEP = 0.5;    // O/P
+float ORIENT_FINE_STEP_FINE = 0.1; // [ / ]
+
+static final float DEG2RAD = PI / 180.0;
+
+// Helper: rotate+flip in "unit" coords
+PVector orientXY(float x, float y) {
+  float ox = x, oy = y;
+
+  // rotace po 90° (hrubá)
+  if (ORIENT_ROT == 1) { float t = ox; ox = oy;  oy = -t; }      // +90
+  else if (ORIENT_ROT == 2) { ox = -ox; oy = -oy; }             // 180
+  else if (ORIENT_ROT == 3) { float t = ox; ox = -oy; oy = t; } // 270
+
+  // zrcadlení
+  if (ORIENT_FLIP_X) ox = -ox;
+  if (ORIENT_FLIP_Y) oy = -oy;
+
+  // jemná rotace (plynulá) – až nakonec
+  if (abs(ORIENT_FINE_DEG) > 0.0001) {
+    float a = ORIENT_FINE_DEG * DEG2RAD;
+    float ca = cos(a), sa = sin(a);
+    float rx = ox * ca - oy * sa;
+    float ry = ox * sa + oy * ca;
+    ox = rx; oy = ry;
+  }
+
+  return new PVector(ox, oy);
+}
+
+String orientText() {
+  int deg = ORIENT_ROT * 90;
+  return deg + "deg FX=" + (ORIENT_FLIP_X ? "1" : "0") +
+         " FY=" + (ORIENT_FLIP_Y ? "1" : "0") +
+         " fine=" + nf(ORIENT_FINE_DEG, 0, 1) + "deg";
+}
+
+// ============================
 // SIMULATION toggle
 // ============================
 boolean USE_SIM = false;          // false = ESP, true = simulace
@@ -66,8 +112,9 @@ int segmentsPerFrame = 20;
 String status = "WAITING";
 int lastDataMs = 0;
 
-// poslední souřadnice
+// poslední souřadnice (v UNIT)
 float lastX = 0, lastY = 0;
+// poslední vykreslené pixely
 float lastDrawX = 0, lastDrawY = 0;
 boolean haveXY = false;
 
@@ -268,6 +315,7 @@ void draw() {
       " strokeColorIdx=" + strokeColorIdx +
       " bgIdx=" + bgIdx +
       " scale=" + nf(scaleFactor, 0, 2) +
+      " orient=" + orientText() +
       (USE_SIM ? (" simPx=" + nf(simScalePx, 0, 0) + " gain=" + nf(SIM_GAIN, 0, 4)) : "")
     );
     linesIn = 0;
@@ -317,9 +365,19 @@ void loadConfig() {
       } else if (k.equalsIgnoreCase("renderMode")) {
         int val = int(v);
         if (val >= 0 && val <= 2) RENDER_MODE = val;
+      } else if (k.equalsIgnoreCase("orientRot")) {
+        int val = int(v);
+        if (val >= 0 && val <= 3) ORIENT_ROT = val;
+      } else if (k.equalsIgnoreCase("flipX")) {
+        ORIENT_FLIP_X = (int(v) != 0);
+      } else if (k.equalsIgnoreCase("flipY")) {
+        ORIENT_FLIP_Y = (int(v) != 0);
+      } else if (k.equalsIgnoreCase("orientFineDeg")) {
+        float val = float(v);
+        if (!Float.isNaN(val)) ORIENT_FINE_DEG = val;
       }
     }
-    println("Config loaded: scaleFactor=" + scaleFactor + " bgIdx=" + bgIdx + " strokeColorIdx=" + strokeColorIdx + " renderMode=" + RENDER_MODE);
+    println("Config loaded: scaleFactor=" + scaleFactor + " bgIdx=" + bgIdx + " strokeColorIdx=" + strokeColorIdx + " renderMode=" + RENDER_MODE + " orient=" + orientText());
   } catch(Exception e) {
     println("Config load failed: " + e);
   }
@@ -332,7 +390,11 @@ void saveConfig() {
       "scaleFactor=" + nf(scaleFactor, 0, 3),
       "bgIdx=" + bgIdx,
       "strokeColorIdx=" + strokeColorIdx,
-      "renderMode=" + RENDER_MODE
+      "renderMode=" + RENDER_MODE,
+      "orientRot=" + ORIENT_ROT,
+      "flipX=" + (ORIENT_FLIP_X ? 1 : 0),
+      "flipY=" + (ORIENT_FLIP_Y ? 1 : 0),
+      "orientFineDeg=" + nf(ORIENT_FINE_DEG, 0, 3)
     };
     saveStrings(CFG_FILE, out);
     println("Config saved -> " + CFG_FILE);
@@ -549,7 +611,11 @@ void generateSimPoints() {
     x = constrain(x, -SIM_UNIT_CLAMP, SIM_UNIT_CLAMP);
     y = constrain(y, -SIM_UNIT_CLAMP, SIM_UNIT_CLAMP);
 
-    // !!! SIM kreslíme přes simScalePx (cca 300x300), NE přes scaleFactor !!!
+    // ORIENTATION (SIM)
+    PVector o = orientXY(x, y);
+    x = o.x; y = o.y;
+
+    // SIM kreslíme přes simScalePx
     float drawX = width/2 + x * simScalePx;
     float drawY = height/2 - y * simScalePx;
 
@@ -590,6 +656,7 @@ void drawHUD() {
     " | ST:" + status +
     " | scale:" + nf(scaleFactor, 0, 2) +
     (USE_SIM ? (" | simPx:" + nf(simScalePx, 0, 0) + " gain:" + nf(SIM_GAIN, 0, 4)) : "") +
+    " | orient:" + orientText() +
     " | render:" + renderModeName() +
     " | col:" + (strokeColorIdx+1) + "/" + STROKE_COLORS.length +
     " | bg:" + (bgIdx+1) + "/" + BG_COLORS.length;
@@ -609,7 +676,7 @@ void drawHUD() {
     String help1 =
       "Keys: D debug | T SIM/SERIAL | 1/2/3 sim mode | Q color | W render | E bg+clear | SPACE clear";
     String help2 =
-      "Scale(ESP): H/J +/-1  K/L +/-0.1 | 0 autofit | S save cfg | C calibrate | R reconnect";
+      "Scale(ESP): H/J +/-1  K/L +/-0.1 | 0 autofit | S save cfg | C calibrate | R reconnect | Orient: U/I rot, N/M flip, O/P fine, [/]=superfine";
 
     hud.text(help1, 10, 40);
     hud.text(help2, 10, 56);
@@ -647,6 +714,10 @@ void serialEvent(Serial p) {
     float x = float(parts[0]);
     float y = float(parts[1]);
 
+    // ORIENTATION (SERIAL)
+    PVector o = orientXY(x, y);
+    x = o.x; y = o.y;
+
     // ESP data používají scaleFactor (ladíš H/J/K/L)
     float drawX = width/2 + x * scaleFactor;
     float drawY = height/2 - y * scaleFactor;
@@ -670,6 +741,49 @@ void serialEvent(Serial p) {
 
 void keyPressed() {
   if (key == 'd' || key == 'D') debugUI = !debugUI;
+
+  // --- ORIENTATION controls ---
+  if (key == 'u' || key == 'U') {
+    ORIENT_ROT = (ORIENT_ROT + 1) % 4;
+    println("Orient => " + orientText());
+  }
+  if (key == 'i' || key == 'I') {
+    ORIENT_ROT = (ORIENT_ROT + 3) % 4;
+    println("Orient => " + orientText());
+  }
+  if (key == 'n' || key == 'N') {
+    ORIENT_FLIP_X = !ORIENT_FLIP_X;
+    println("Orient => " + orientText());
+  }
+  if (key == 'm' || key == 'M') {
+    ORIENT_FLIP_Y = !ORIENT_FLIP_Y;
+    println("Orient => " + orientText());
+  }
+    // jemná rotace (plynule)
+  if (key == 'o' || key == 'O') {
+    ORIENT_FINE_DEG -= ORIENT_FINE_STEP;
+    println("Orient => " + orientText());
+  }
+  if (key == 'p' || key == 'P') {
+    ORIENT_FINE_DEG += ORIENT_FINE_STEP;
+    println("Orient => " + orientText());
+  }
+
+  // super jemné doladění
+  if (key == '[') {
+    ORIENT_FINE_DEG -= ORIENT_FINE_STEP_FINE;
+    println("Orient => " + orientText());
+  }
+  if (key == ']') {
+    ORIENT_FINE_DEG += ORIENT_FINE_STEP_FINE;
+    println("Orient => " + orientText());
+  }
+
+  // reset jemné rotace
+  if (keyCode == BACKSPACE) {
+    ORIENT_FINE_DEG = 0.0;
+    println("Orient => " + orientText());
+  }
 
   // --- SCALE controls (ESP) ---
   if (key == 'h' || key == 'H') {

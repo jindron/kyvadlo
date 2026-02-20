@@ -3,3 +3,7 @@ scaleFactor=300,000
 bgIdx=0
 strokeColorIdx=1
 renderMode=1
+orientRot=2
+flipX=0
+flipY=0
+orientFineDeg=5,500
