@@ -1,9 +1,0 @@
-# Kyvadlo config
-scaleFactor=316.1
-bgIdx=0
-strokeColorIdx=1
-renderMode=1
-orientRot=0
-flipX=0
-flipY=0
-orientFineDeg=7.5
