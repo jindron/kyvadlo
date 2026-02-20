@@ -1,11 +1,12 @@
 import processing.serial.*;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.io.File;
 
 Serial myPort;
 
 // ============================
-// CONFIG (saved to sketch folder)
+// CONFIG (saved outside repo)
 // ============================
 final String CFG_FILE = configPath();
 
@@ -17,9 +18,9 @@ boolean ORIENT_FLIP_X = false;  // mirror X (left/right)
 boolean ORIENT_FLIP_Y = false;  // mirror Y (up/down)
 
 // jemná rotace v deg (typicky +/- pár stupňů)
-float ORIENT_FINE_DEG = 0.0;     // plynulé doladění
-float ORIENT_FINE_STEP = 0.5;    // O/P
-float ORIENT_FINE_STEP_FINE = 0.1; // [ / ]
+float ORIENT_FINE_DEG = 0.0;        // plynulé doladění
+float ORIENT_FINE_STEP = 0.5;       // coarse step (LEFT/RIGHT)
+float ORIENT_FINE_STEP_FINE = 0.1;  // SHIFT+LEFT/RIGHT
 
 static final float DEG2RAD = PI / 180.0;
 
@@ -52,7 +53,82 @@ String orientText() {
   int deg = ORIENT_ROT * 90;
   return deg + "deg FX=" + (ORIENT_FLIP_X ? "1" : "0") +
          " FY=" + (ORIENT_FLIP_Y ? "1" : "0") +
-         " fine=" + nf(ORIENT_FINE_DEG, 0, 1) + "deg";
+         " fine=" + nf(ORIENT_FINE_DEG, 0, 2) + "deg";
+}
+
+// ============================
+// SCALE (ESP data)
+// ============================
+float scaleFactor = 300;
+float SCALE_STEP = 1.0;        // LEFT/RIGHT when SCALE selected
+float SCALE_STEP_FINE = 0.1;   // SHIFT+LEFT/RIGHT when SCALE selected
+float SCALE_MIN = 10;
+float SCALE_MAX = 5000;
+
+// ============================
+// PARAM EDIT UI
+// TAB selects param, LEFT/RIGHT changes param, SHIFT = fine step where applicable
+// BACKSPACE resets selected param
+// ============================
+int EDIT_PARAM = 0;
+// 0=ROT90, 1=FLIP_X, 2=FLIP_Y, 3=FINE_DEG, 4=SCALE
+static final int EDIT_PARAM_COUNT = 5;
+
+String editParamName() {
+  if (EDIT_PARAM == 0) return "ROT90";
+  if (EDIT_PARAM == 1) return "FLIP_X";
+  if (EDIT_PARAM == 2) return "FLIP_Y";
+  if (EDIT_PARAM == 3) return "FINE_DEG";
+  return "SCALE";
+}
+
+String editParamValue() {
+  if (EDIT_PARAM == 0) return str(ORIENT_ROT * 90) + "deg";
+  if (EDIT_PARAM == 1) return ORIENT_FLIP_X ? "ON" : "OFF";
+  if (EDIT_PARAM == 2) return ORIENT_FLIP_Y ? "ON" : "OFF";
+  if (EDIT_PARAM == 3) return nf(ORIENT_FINE_DEG, 0, 2) + "deg";
+  return nf(scaleFactor, 0, 2);
+}
+
+void editSelectNext() {
+  EDIT_PARAM = (EDIT_PARAM + 1) % EDIT_PARAM_COUNT;
+  println("Edit => " + editParamName() + " (" + editParamValue() + ")");
+}
+
+void editAdjust(int dir, boolean fineStep) {
+  if (dir == 0) return;
+
+  if (EDIT_PARAM == 0) {
+    ORIENT_ROT = (ORIENT_ROT + (dir > 0 ? 1 : 3)) % 4;
+
+  } else if (EDIT_PARAM == 1) {
+    ORIENT_FLIP_X = !ORIENT_FLIP_X;
+
+  } else if (EDIT_PARAM == 2) {
+    ORIENT_FLIP_Y = !ORIENT_FLIP_Y;
+
+  } else if (EDIT_PARAM == 3) {
+    float step = fineStep ? ORIENT_FINE_STEP_FINE : ORIENT_FINE_STEP;
+    ORIENT_FINE_DEG += dir * step;
+    ORIENT_FINE_DEG = constrain(ORIENT_FINE_DEG, -45.0, 45.0);
+
+  } else { // SCALE
+    float step = fineStep ? SCALE_STEP_FINE : SCALE_STEP;
+    scaleFactor += dir * step;
+    scaleFactor = constrain(scaleFactor, SCALE_MIN, SCALE_MAX);
+  }
+
+  println("Edit => " + editParamName() + "=" + editParamValue() + " | orient=" + orientText() + " | scale=" + nf(scaleFactor, 0, 2));
+}
+
+void editResetSelected() {
+  if (EDIT_PARAM == 0) ORIENT_ROT = 0;
+  else if (EDIT_PARAM == 1) ORIENT_FLIP_X = false;
+  else if (EDIT_PARAM == 2) ORIENT_FLIP_Y = false;
+  else if (EDIT_PARAM == 3) ORIENT_FINE_DEG = 0.0;
+  else autoFitScale(); // SCALE reset => autofit
+
+  println("Reset => " + editParamName() + "=" + editParamValue() + " | orient=" + orientText() + " | scale=" + nf(scaleFactor, 0, 2));
 }
 
 // ============================
@@ -62,7 +138,7 @@ boolean USE_SIM = false;          // false = ESP, true = simulace
 int SIM_MODE = 1;                 // 1=Lissajous, 2=Spiro, 3=Random walk
 
 // SIM hodnoty chceme v "unit" rozsahu jako ESP (cca -1..1)
-float SIM_GAIN = 0.008;   // 90 * 0.008 = 0.72  (rozumné)
+float SIM_GAIN = 0.008;   // 90 * 0.008 = 0.72
 float simRateHz = 200;
 int simPointsPerFrameMax = 12;
 
@@ -78,29 +154,16 @@ int baud = 115200;
 String defaultPreferredPort() {
   String os = System.getProperty("os.name").toLowerCase();
   if (os.contains("win")) return "COM7";
-
-  // Na Linux/RPi se po replug může změnit ttyACM0/1 a navíc v listu bývá /dev/serial0 (UART) který je často BUSY.
-  // Necháme to prázdné a budeme vybírat robustně v connectSerial().
   if (os.contains("linux")) return "";
-
   return "";
 }
 
 int reconnectEveryMs = 2000;
 int lastReconnectTryMs = 0;
 
-// když je port objekt pořád "živý", ale data netečou (po odpojení USB),
-// tak ho po timeoutu shodíme a necháme ensureConnected() znovu připojit
-int noDataDisconnectMs = 1200;  // po kolika ms bez dat udělat disconnect
-int connectGraceMs = 2500;      // grace po connectu (aby se to hned neshodilo)
+int noDataDisconnectMs = 1200;
+int connectGraceMs = 2500;
 int lastConnectMs = 0;
-
-// SCALE pro ESP (reálná data) – ovládáš H/J/K/L
-float scaleFactor = 300;
-float SCALE_STEP_FINE = 1.0;   // H/J
-float SCALE_STEP_SUPER = 0.1;  // K/L
-float SCALE_MIN = 10;
-float SCALE_MAX = 5000;
 
 // ---- kreslení ----
 boolean havePrev = false;
@@ -135,7 +198,7 @@ float simT = 0;
 float simCarry = 0;
 float rwX = 0, rwY = 0;
 
-// drift (aby se to v SIM tolik nepřekrývalo) – v UNIT měřítku!
+// drift (unit)
 float driftX = 0, driftY = 0;
 float driftVX = 0, driftVY = 0;
 
@@ -153,51 +216,40 @@ String renderModeName() {
 // ============================
 // PALETTES
 // ============================
-// HSB palette: {H, S, B}  (H:0-360, S:0-100, B:0-100)
 float [][] STROKE_COLORS = {
   {  0,  0,  0},  // 0: BLACK
   {  0, 90, 85},  // 1: RED
   { 60, 90, 95},  // 2: YELLOW
   {220, 90, 85},  // 3: BLUE
-
   { 30, 90, 92},  // 4: ORANGE
   {120, 90, 80},  // 5: GREEN
   {270, 85, 80},  // 6: PURPLE
-
   { 25, 70, 45},  // 7: BROWN
   {  0,  0, 100}   // 8: WHITE
 };
-
 int strokeColorIdx = 1;
 
-// 5 pozadí (HSB: hue,sat,bri)
 float[][] BG_COLORS = {
-  {0, 0, 100},    // bílá
-  {0, 0, 94},     // světle šedá
-  {45, 10, 98},   // papír
-  {220, 30, 14},  // tmavě modrá
-  {0, 0, 0}       // černá
+  {0, 0, 100},
+  {0, 0, 94},
+  {45, 10, 98},
+  {220, 30, 14},
+  {0, 0, 0}
 };
 int bgIdx = 0;
 
-// ============================
-// CURRENT COLORS (derived from palette)
-// ============================
+// derived colors
 float lineHue, lineSat, lineBri;
 int inkHue, inkSat, inkBri;
 int sandHue, sandSat, sandBri;
 
-// ============================
-// BRUSH (ink) settings
-// ============================
+// brush settings
 boolean INK_MULTIPLY = true;
 float inkBrushR = 2.0;
 float inkAlpha = 18;
 float inkSpacing = 2.0;
 
-// ============================
-// SAND settings
-// ============================
+// sand settings
 float sandSpacing = 2.5;
 int sandGrainsPerStep = 4;
 float sandSpread = 3.0;
@@ -205,20 +257,19 @@ float sandMinR = 0.8;
 float sandMaxR = 1.7;
 float sandAlpha = 22;
 
-// ============================
-// LINE settings
-// ============================
+// line settings
 float lineWeight = 2.0;
 float MIN_LINE_SEG_PX = 0.8;
 
-// ============================
-// “rychlejší pohyb = světlejší/řidší”
-// ============================
+// speed mapping
 float SPEED_DIST_REF = 18.0;
 float SPEED_ALPHA_MIN = 0.30;
 float SPEED_ALPHA_MAX = 1.25;
 float SPEED_SPACING_GAIN = 0.05;
 
+// ============================
+// paths / parsing helpers
+// ============================
 String configPath() {
   String os = System.getProperty("os.name").toLowerCase();
 
@@ -228,21 +279,47 @@ String configPath() {
     return System.getProperty("user.home") + "\\Kyvadlo\\config.txt";
   }
 
-  // Linux / macOS fallback
   return System.getProperty("user.home") + "/.config/kyvadlo/config.txt";
+}
+
+float parseFloatSafe(String s, float fallback) {
+  if (s == null) return fallback;
+  s = trim(s);
+  if (s.length() == 0) return fallback;
+  s = s.replace(',', '.');
+  int hash = s.indexOf('#');
+  if (hash >= 0) s = trim(s.substring(0, hash));
+  try {
+    float v = Float.parseFloat(s);
+    if (Float.isNaN(v) || Float.isInfinite(v)) return fallback;
+    return v;
+  } catch (Exception e) {
+    return fallback;
+  }
+}
+
+int parseIntSafe(String s, int fallback) {
+  if (s == null) return fallback;
+  s = trim(s);
+  if (s.length() == 0) return fallback;
+  int hash = s.indexOf('#');
+  if (hash >= 0) s = trim(s.substring(0, hash));
+  try {
+    return Integer.parseInt(s);
+  } catch (Exception e) {
+    return fallback;
+  }
 }
 
 void setup() {
   size(800, 800);
   smooth();
 
-  // načti config dřív, než začneš kreslit
   loadConfig();
 
   canvasLayer = createGraphics(width, height);
   hud = createGraphics(width, height);
 
-  // canvas init
   canvasLayer.beginDraw();
   canvasLayer.colorMode(HSB, 360, 100, 100, 255);
   canvasLayer.background(BG_COLORS[bgIdx][0], BG_COLORS[bgIdx][1], BG_COLORS[bgIdx][2]);
@@ -328,8 +405,7 @@ void draw() {
       " strokeColorIdx=" + strokeColorIdx +
       " bgIdx=" + bgIdx +
       " scale=" + nf(scaleFactor, 0, 2) +
-      " orient=" + orientText() +
-      (USE_SIM ? (" simPx=" + nf(simScalePx, 0, 0) + " gain=" + nf(SIM_GAIN, 0, 4)) : "")
+      " orient=" + orientText()
     );
     linesIn = 0;
     segmentsDrawn = 0;
@@ -354,6 +430,7 @@ void loadConfig() {
       println("Config: none (using defaults)");
       return;
     }
+
     for (String s : lines) {
       if (s == null) continue;
       s = trim(s);
@@ -367,30 +444,37 @@ void loadConfig() {
       String v = trim(s.substring(eq + 1));
 
       if (k.equalsIgnoreCase("scaleFactor")) {
-        float val = float(v);
-        if (!Float.isNaN(val) && val > 0) scaleFactor = val;
+        float val = parseFloatSafe(v, scaleFactor);
+        if (val > 0) scaleFactor = val;
+
       } else if (k.equalsIgnoreCase("bgIdx")) {
-        int val = int(v);
+        int val = parseIntSafe(v, bgIdx);
         if (val >= 0 && val < BG_COLORS.length) bgIdx = val;
+
       } else if (k.equalsIgnoreCase("strokeColorIdx")) {
-        int val = int(v);
+        int val = parseIntSafe(v, strokeColorIdx);
         if (val >= 0 && val < STROKE_COLORS.length) strokeColorIdx = val;
+
       } else if (k.equalsIgnoreCase("renderMode")) {
-        int val = int(v);
+        int val = parseIntSafe(v, RENDER_MODE);
         if (val >= 0 && val <= 2) RENDER_MODE = val;
+
       } else if (k.equalsIgnoreCase("orientRot")) {
-        int val = int(v);
+        int val = parseIntSafe(v, ORIENT_ROT);
         if (val >= 0 && val <= 3) ORIENT_ROT = val;
+
       } else if (k.equalsIgnoreCase("flipX")) {
-        ORIENT_FLIP_X = (int(v) != 0);
+        ORIENT_FLIP_X = (parseIntSafe(v, ORIENT_FLIP_X ? 1 : 0) != 0);
+
       } else if (k.equalsIgnoreCase("flipY")) {
-        ORIENT_FLIP_Y = (int(v) != 0);
+        ORIENT_FLIP_Y = (parseIntSafe(v, ORIENT_FLIP_Y ? 1 : 0) != 0);
+
       } else if (k.equalsIgnoreCase("orientFineDeg")) {
-        float val = float(v);
-        if (!Float.isNaN(val)) ORIENT_FINE_DEG = val;
+        ORIENT_FINE_DEG = parseFloatSafe(v, ORIENT_FINE_DEG);
       }
     }
-    println("Config loaded: scaleFactor=" + scaleFactor + " bgIdx=" + bgIdx + " strokeColorIdx=" + strokeColorIdx + " renderMode=" + RENDER_MODE + " orient=" + orientText());
+
+    println("Config loaded: scale=" + nf(scaleFactor, 0, 2) + " orient=" + orientText());
   } catch(Exception e) {
     println("Config load failed: " + e);
   }
@@ -409,8 +493,9 @@ void saveConfig() {
       "flipY=" + (ORIENT_FLIP_Y ? 1 : 0),
       "orientFineDeg=" + Float.toString(ORIENT_FINE_DEG)
     };
+
     File f = new File(CFG_FILE);
-    f.getParentFile().mkdirs();
+    if (f.getParentFile() != null) f.getParentFile().mkdirs();
     saveStrings(CFG_FILE, out);
     println("Config saved -> " + CFG_FILE);
   } catch(Exception e) {
@@ -419,9 +504,9 @@ void saveConfig() {
 }
 
 void autoFitScale() {
-  // "rozumný" poloměr ~40% menší strany okna
   scaleFactor = min(width, height) * 0.40;
-  println("Auto-fit scaleFactor=" + nf(scaleFactor, 0, 1));
+  scaleFactor = constrain(scaleFactor, SCALE_MIN, SCALE_MAX);
+  println("Auto-fit scaleFactor=" + nf(scaleFactor, 0, 2));
 }
 
 // ============================
@@ -469,7 +554,7 @@ float spacingFactorFromDist(float dist) {
 }
 
 // ============================
-// RENDER: LINE
+// RENDER: LINE / BRUSH / SAND
 // ============================
 void drawLineSegment(PGraphics g, float x1, float y1, float x2, float y2) {
   float dx = x2 - x1;
@@ -484,9 +569,6 @@ void drawLineSegment(PGraphics g, float x1, float y1, float x2, float y2) {
   g.line(x1, y1, x2, y2);
 }
 
-// ============================
-// RENDER: BRUSH (ink)
-// ============================
 void drawInkSegment(PGraphics g, float x1, float y1, float x2, float y2) {
   if (INK_MULTIPLY) g.blendMode(MULTIPLY);
   else g.blendMode(BLEND);
@@ -517,9 +599,6 @@ void drawInkSegment(PGraphics g, float x1, float y1, float x2, float y2) {
   g.blendMode(BLEND);
 }
 
-// ============================
-// RENDER: SAND
-// ============================
 void drawSandSegment(PGraphics g, float x1, float y1, float x2, float y2) {
   g.blendMode(BLEND);
 
@@ -569,7 +648,6 @@ void generateSimPoints() {
   simCarry -= toGen;
   float step = 1.0 / simRateHz;
 
-  // drift/noise v UNIT měřítku (ne px)
   float driftAccel = 0.010;
   float driftDamp  = 0.995;
   float driftMaxV  = 0.06;
@@ -603,11 +681,9 @@ void generateSimPoints() {
       x = rwX; y = rwY;
     }
 
-    // převod SIM -> unit
     x *= SIM_GAIN;
     y *= SIM_GAIN;
 
-    // drift (unit)
     driftVX += random(-driftAccel, driftAccel) * step;
     driftVY += random(-driftAccel, driftAccel) * step;
     driftVX *= driftDamp;
@@ -622,15 +698,12 @@ void generateSimPoints() {
     x += driftX + random(-noiseAmp, noiseAmp);
     y += driftY + random(-noiseAmp, noiseAmp);
 
-    // pojistka aby to neuteklo (unit)
     x = constrain(x, -SIM_UNIT_CLAMP, SIM_UNIT_CLAMP);
     y = constrain(y, -SIM_UNIT_CLAMP, SIM_UNIT_CLAMP);
 
-    // ORIENTATION (SIM)
     PVector o = orientXY(x, y);
     x = o.x; y = o.y;
 
-    // SIM kreslíme přes simScalePx
     float drawX = width/2 + x * simScalePx;
     float drawY = height/2 - y * simScalePx;
 
@@ -672,6 +745,7 @@ void drawHUD() {
     " | scale:" + nf(scaleFactor, 0, 2) +
     (USE_SIM ? (" | simPx:" + nf(simScalePx, 0, 0) + " gain:" + nf(SIM_GAIN, 0, 4)) : "") +
     " | orient:" + orientText() +
+    " | edit:" + editParamName() + "=" + editParamValue() +
     " | render:" + renderModeName() +
     " | col:" + (strokeColorIdx+1) + "/" + STROKE_COLORS.length +
     " | bg:" + (bgIdx+1) + "/" + BG_COLORS.length;
@@ -691,7 +765,7 @@ void drawHUD() {
     String help1 =
       "Keys: D debug | T SIM/SERIAL | 1/2/3 sim mode | Q color | W render | E bg+clear | SPACE clear";
     String help2 =
-      "Scale(ESP): H/J +/-1  K/L +/-0.1 | 0 autofit | S save cfg | C calibrate | R reconnect | Orient: U/I rot, N/M flip, O/P fine, [/]=superfine";
+      "Edit: TAB select | \u2190/\u2192 change | SHIFT+\u2190/\u2192 fine | BACKSPACE reset | 0 autofit scale | S save cfg | C calibrate | R reconnect";
 
     hud.text(help1, 10, 40);
     hud.text(help2, 10, 56);
@@ -729,11 +803,9 @@ void serialEvent(Serial p) {
     float x = float(parts[0]);
     float y = float(parts[1]);
 
-    // ORIENTATION (SERIAL)
     PVector o = orientXY(x, y);
     x = o.x; y = o.y;
 
-    // ESP data používají scaleFactor (ladíš H/J/K/L)
     float drawX = width/2 + x * scaleFactor;
     float drawY = height/2 - y * scaleFactor;
 
@@ -757,69 +829,24 @@ void serialEvent(Serial p) {
 void keyPressed() {
   if (key == 'd' || key == 'D') debugUI = !debugUI;
 
-  // --- ORIENTATION controls ---
-  if (key == 'u' || key == 'U') {
-    ORIENT_ROT = (ORIENT_ROT + 1) % 4;
-    println("Orient => " + orientText());
+  // --- PARAM editor ---
+  if (key == TAB) {
+    editSelectNext();
+    return;
   }
-  if (key == 'i' || key == 'I') {
-    ORIENT_ROT = (ORIENT_ROT + 3) % 4;
-    println("Orient => " + orientText());
+  if (keyCode == LEFT) {
+    boolean fine = (keyEvent != null && keyEvent.isShiftDown());
+    editAdjust(-1, fine);
+    return;
   }
-  if (key == 'n' || key == 'N') {
-    ORIENT_FLIP_X = !ORIENT_FLIP_X;
-    println("Orient => " + orientText());
+  if (keyCode == RIGHT) {
+    boolean fine = (keyEvent != null && keyEvent.isShiftDown());
+    editAdjust(+1, fine);
+    return;
   }
-  if (key == 'm' || key == 'M') {
-    ORIENT_FLIP_Y = !ORIENT_FLIP_Y;
-    println("Orient => " + orientText());
-  }
-    // jemná rotace (plynule)
-  if (key == 'o' || key == 'O') {
-    ORIENT_FINE_DEG -= ORIENT_FINE_STEP;
-    println("Orient => " + orientText());
-  }
-  if (key == 'p' || key == 'P') {
-    ORIENT_FINE_DEG += ORIENT_FINE_STEP;
-    println("Orient => " + orientText());
-  }
-
-  // super jemné doladění
-  if (key == '[') {
-    ORIENT_FINE_DEG -= ORIENT_FINE_STEP_FINE;
-    println("Orient => " + orientText());
-  }
-  if (key == ']') {
-    ORIENT_FINE_DEG += ORIENT_FINE_STEP_FINE;
-    println("Orient => " + orientText());
-  }
-
-  // reset jemné rotace
   if (keyCode == BACKSPACE) {
-    ORIENT_FINE_DEG = 0.0;
-    println("Orient => " + orientText());
-  }
-
-  // --- SCALE controls (ESP) ---
-  if (key == 'h' || key == 'H') {
-    scaleFactor -= SCALE_STEP_FINE;
-    scaleFactor = constrain(scaleFactor, SCALE_MIN, SCALE_MAX);
-    println("Scale => " + nf(scaleFactor, 0, 3));
-  }
-  if (key == 'j' || key == 'J') {
-    scaleFactor += SCALE_STEP_FINE;
-    scaleFactor = constrain(scaleFactor, SCALE_MIN, SCALE_MAX);
-    println("Scale => " + nf(scaleFactor, 0, 3));
-  }
-  if (key == 'k' || key == 'K') {
-    scaleFactor -= SCALE_STEP_SUPER;
-    scaleFactor = constrain(scaleFactor, SCALE_MIN, SCALE_MAX);
-    println("Scale => " + nf(scaleFactor, 0, 3));
-  }
-  if (key == 'l' || key == 'L') {
-    scaleFactor += SCALE_STEP_SUPER;
-    scaleFactor = constrain(scaleFactor, SCALE_MIN, SCALE_MAX);
-    println("Scale => " + nf(scaleFactor, 0, 3));
+    editResetSelected();
+    return;
   }
 
   if (key == '0') autoFitScale();
