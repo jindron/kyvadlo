@@ -7,7 +7,7 @@ Serial myPort;
 // ============================
 // CONFIG (saved to sketch folder)
 // ============================
-final String CFG_FILE = "config.txt";
+final String CFG_FILE = configPath();
 
 // ============================
 // ORIENTATION (rotation + mirror + fine rotate)  (applies to SERIAL + SIM)
@@ -219,6 +219,19 @@ float SPEED_ALPHA_MIN = 0.30;
 float SPEED_ALPHA_MAX = 1.25;
 float SPEED_SPACING_GAIN = 0.05;
 
+String configPath() {
+  String os = System.getProperty("os.name").toLowerCase();
+
+  if (os.contains("win")) {
+    String appdata = System.getenv("APPDATA");
+    if (appdata != null) return appdata + "\\Kyvadlo\\config.txt";
+    return System.getProperty("user.home") + "\\Kyvadlo\\config.txt";
+  }
+
+  // Linux / macOS fallback
+  return System.getProperty("user.home") + "/.config/kyvadlo/config.txt";
+}
+
 void setup() {
   size(800, 800);
   smooth();
@@ -387,15 +400,17 @@ void saveConfig() {
   try {
     String[] out = new String[] {
       "# Kyvadlo config",
-      "scaleFactor=" + nf(scaleFactor, 0, 3),
+      "scaleFactor=" + Float.toString(scaleFactor),
       "bgIdx=" + bgIdx,
       "strokeColorIdx=" + strokeColorIdx,
       "renderMode=" + RENDER_MODE,
       "orientRot=" + ORIENT_ROT,
       "flipX=" + (ORIENT_FLIP_X ? 1 : 0),
       "flipY=" + (ORIENT_FLIP_Y ? 1 : 0),
-      "orientFineDeg=" + nf(ORIENT_FINE_DEG, 0, 3)
+      "orientFineDeg=" + Float.toString(ORIENT_FINE_DEG)
     };
+    File f = new File(CFG_FILE);
+    f.getParentFile().mkdirs();
     saveStrings(CFG_FILE, out);
     println("Config saved -> " + CFG_FILE);
   } catch(Exception e) {
