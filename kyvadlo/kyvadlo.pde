@@ -56,6 +56,15 @@ String orientText() {
          " fine=" + nf(ORIENT_FINE_DEG, 0, 2) + "deg";
 }
 
+  // ============================
+  // CENTER OFFSET (px) - when TV center isn't under pendulum
+  // ============================
+  float CENTER_OFF_X_PX = 0.0;
+  float CENTER_OFF_Y_PX = 0.0;
+  float OFFS_STEP = 5.0;       // px per press
+  float OFFS_STEP_FINE = 1.0;  // SHIFT step
+
+
 // ============================
 // SCALE (ESP data)
 // ============================
@@ -72,14 +81,16 @@ float SCALE_MAX = 5000;
 // ============================
 int EDIT_PARAM = 0;
 // 0=ROT90, 1=FLIP_X, 2=FLIP_Y, 3=FINE_DEG, 4=SCALE
-static final int EDIT_PARAM_COUNT = 5;
+static final int EDIT_PARAM_COUNT = 7;
 
 String editParamName() {
   if (EDIT_PARAM == 0) return "ROT90";
   if (EDIT_PARAM == 1) return "FLIP_X";
   if (EDIT_PARAM == 2) return "FLIP_Y";
   if (EDIT_PARAM == 3) return "FINE_DEG";
-  return "SCALE";
+  if (EDIT_PARAM == 4) return "SCALE";
+  if (EDIT_PARAM == 5) return "OFFS_X";
+  return "OFFS_Y";
 }
 
 String editParamValue() {
@@ -87,7 +98,9 @@ String editParamValue() {
   if (EDIT_PARAM == 1) return ORIENT_FLIP_X ? "ON" : "OFF";
   if (EDIT_PARAM == 2) return ORIENT_FLIP_Y ? "ON" : "OFF";
   if (EDIT_PARAM == 3) return nf(ORIENT_FINE_DEG, 0, 2) + "deg";
-  return nf(scaleFactor, 0, 2);
+  if (EDIT_PARAM == 4) return nf(scaleFactor, 0, 2);
+  if (EDIT_PARAM == 5) return nf(CENTER_OFF_X_PX, 0, 1) + "px";
+  return nf(CENTER_OFF_Y_PX, 0, 1) + "px";
 }
 
 void editSelectNext() {
@@ -112,10 +125,18 @@ void editAdjust(int dir, boolean fineStep) {
     ORIENT_FINE_DEG += dir * step;
     ORIENT_FINE_DEG = constrain(ORIENT_FINE_DEG, -45.0, 45.0);
 
-  } else { // SCALE
+  } else if (EDIT_PARAM == 4) {
     float step = fineStep ? SCALE_STEP_FINE : SCALE_STEP;
     scaleFactor += dir * step;
     scaleFactor = constrain(scaleFactor, SCALE_MIN, SCALE_MAX);
+    
+  } else if (EDIT_PARAM == 5) { // OFFS_X
+    float step = fineStep ? OFFS_STEP_FINE : OFFS_STEP;
+    CENTER_OFF_X_PX += dir * step;
+
+  } else { // OFFS_Y
+    float step = fineStep ? OFFS_STEP_FINE : OFFS_STEP;
+    CENTER_OFF_Y_PX += dir * step;
   }
 
   println("Edit => " + editParamName() + "=" + editParamValue() + " | orient=" + orientText() + " | scale=" + nf(scaleFactor, 0, 2));
@@ -126,7 +147,9 @@ void editResetSelected() {
   else if (EDIT_PARAM == 1) ORIENT_FLIP_X = false;
   else if (EDIT_PARAM == 2) ORIENT_FLIP_Y = false;
   else if (EDIT_PARAM == 3) ORIENT_FINE_DEG = 0.0;
-  else autoFitScale(); // SCALE reset => autofit
+  else if (EDIT_PARAM == 4) autoFitScale(); // SCALE reset => autofit
+  else if (EDIT_PARAM == 5) CENTER_OFF_X_PX = 0.0;
+  else CENTER_OFF_Y_PX = 0.0;
 
   println("Reset => " + editParamName() + "=" + editParamValue() + " | orient=" + orientText() + " | scale=" + nf(scaleFactor, 0, 2));
 }
@@ -225,15 +248,12 @@ float [][] STROKE_COLORS = {
   {120, 90, 80},  // 5: GREEN
   {270, 85, 80},  // 6: PURPLE
   { 25, 70, 45},  // 7: BROWN
-  {  0,  0, 100}   // 8: WHITE
+  { 0, 0, 100}    // 8: WHITE
 };
 int strokeColorIdx = 1;
 
 float[][] BG_COLORS = {
   {0, 0, 100},
-  {0, 0, 94},
-  {45, 10, 98},
-  {220, 30, 14},
   {0, 0, 0}
 };
 int bgIdx = 0;
@@ -311,8 +331,30 @@ int parseIntSafe(String s, int fallback) {
   }
 }
 
+boolean isBlackBG() { return bgIdx == 1; }
+boolean isWhiteBG() { return bgIdx == 0; }
+
+boolean strokeColorAllowed(int idx) {
+  // na černém pozadí nechceme černou
+  if (isBlackBG() && idx == 0) return false;
+  // na bílém pozadí nechceme bílou
+  if (isWhiteBG() && idx == 8) return false;
+  return true;
+}
+
+void nextStrokeColor() {
+  int tries = 0;
+  do {
+    strokeColorIdx = (strokeColorIdx + 1) % STROKE_COLORS.length;
+    tries++;
+  } while (!strokeColorAllowed(strokeColorIdx) && tries < STROKE_COLORS.length);
+
+  applyStrokePalette();
+  println("STROKE_COLOR => " + (strokeColorIdx+1) + "/" + STROKE_COLORS.length);
+}
+
 void setup() {
-  size(800, 800);
+  size(1000, 800);
   smooth();
 
   loadConfig();
@@ -471,9 +513,14 @@ void loadConfig() {
 
       } else if (k.equalsIgnoreCase("orientFineDeg")) {
         ORIENT_FINE_DEG = parseFloatSafe(v, ORIENT_FINE_DEG);
-      }
-    }
+        
+      } else if (k.equalsIgnoreCase("centerOffXPx")) {
+        CENTER_OFF_X_PX = parseFloatSafe(v, CENTER_OFF_X_PX);
 
+      } else if (k.equalsIgnoreCase("centerOffYPx")) {
+        CENTER_OFF_Y_PX = parseFloatSafe(v, CENTER_OFF_Y_PX);
+      }
+   }
     println("Config loaded: scale=" + nf(scaleFactor, 0, 2) + " orient=" + orientText());
   } catch(Exception e) {
     println("Config load failed: " + e);
@@ -491,7 +538,9 @@ void saveConfig() {
       "orientRot=" + ORIENT_ROT,
       "flipX=" + (ORIENT_FLIP_X ? 1 : 0),
       "flipY=" + (ORIENT_FLIP_Y ? 1 : 0),
-      "orientFineDeg=" + Float.toString(ORIENT_FINE_DEG)
+      "orientFineDeg=" + Float.toString(ORIENT_FINE_DEG),
+      "centerOffXPx=" + Float.toString(CENTER_OFF_X_PX),
+      "centerOffYPx=" + Float.toString(CENTER_OFF_Y_PX)
     };
 
     File f = new File(CFG_FILE);
@@ -570,7 +619,9 @@ void drawLineSegment(PGraphics g, float x1, float y1, float x2, float y2) {
 }
 
 void drawInkSegment(PGraphics g, float x1, float y1, float x2, float y2) {
-  if (INK_MULTIPLY) g.blendMode(MULTIPLY);
+// na černé pozadí: světelný štětec
+  if (isBlackBG()) g.blendMode(ADD);
+  else if (INK_MULTIPLY) g.blendMode(MULTIPLY);
   else g.blendMode(BLEND);
 
   float dx = x2 - x1;
@@ -704,8 +755,11 @@ void generateSimPoints() {
     PVector o = orientXY(x, y);
     x = o.x; y = o.y;
 
-    float drawX = width/2 + x * simScalePx;
-    float drawY = height/2 - y * simScalePx;
+    float cx = width/2 + CENTER_OFF_X_PX;
+    float cy = height/2 + CENTER_OFF_Y_PX;
+    
+    float drawX = cx + x * simScalePx;
+    float drawY = cy - y * simScalePx;
 
     lastX = x; lastY = y;
     lastDrawX = drawX; lastDrawY = drawY;
@@ -748,7 +802,8 @@ void drawHUD() {
     " | edit:" + editParamName() + "=" + editParamValue() +
     " | render:" + renderModeName() +
     " | col:" + (strokeColorIdx+1) + "/" + STROKE_COLORS.length +
-    " | bg:" + (bgIdx+1) + "/" + BG_COLORS.length;
+    " | bg:" + (bgIdx+1) + "/" + BG_COLORS.length +
+    " | off=(" + nf(CENTER_OFF_X_PX,0,0) + "," + nf(CENTER_OFF_Y_PX,0,0) + ")px";
 
   hud.text(line1, 10, 4);
 
@@ -806,8 +861,11 @@ void serialEvent(Serial p) {
     PVector o = orientXY(x, y);
     x = o.x; y = o.y;
 
-    float drawX = width/2 + x * scaleFactor;
-    float drawY = height/2 - y * scaleFactor;
+    float cx = width/2 + CENTER_OFF_X_PX;
+    float cy = height/2 + CENTER_OFF_Y_PX;
+    
+    float drawX = cx + x * scaleFactor;
+    float drawY = cy - y * scaleFactor;
 
     lastX = x; lastY = y;
     lastDrawX = drawX; lastDrawY = drawY;
@@ -854,6 +912,7 @@ void keyPressed() {
 
   if (key == 'q' || key == 'Q') {
     strokeColorIdx = (strokeColorIdx + 1) % STROKE_COLORS.length;
+    if (!strokeColorAllowed(strokeColorIdx)) nextStrokeColor();
     applyStrokePalette();
     println("STROKE_COLOR => " + (strokeColorIdx+1) + "/" + STROKE_COLORS.length);
   }
@@ -866,6 +925,7 @@ void keyPressed() {
   if (key == 'e' || key == 'E') {
     bgIdx = (bgIdx + 1) % BG_COLORS.length;
     applyBackgroundAndClear();
+    if (!strokeColorAllowed(strokeColorIdx)) nextStrokeColor();
     println("BACKGROUND => " + (bgIdx+1) + "/" + BG_COLORS.length + " (cleared)");
   }
 
