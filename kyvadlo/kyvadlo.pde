@@ -258,6 +258,8 @@ float[][] BG_COLORS = {
 };
 int bgIdx = 0;
 
+float drawWidth = 3.0;
+
 // derived colors
 float lineHue, lineSat, lineBri;
 int inkHue, inkSat, inkBri;
@@ -266,19 +268,19 @@ int sandHue, sandSat, sandBri;
 // brush settings
 boolean INK_MULTIPLY = true;
 float inkBrushR = 2.0;
-float inkAlpha = 18;
-float inkSpacing = 2.0;
+float inkAlpha = 25;
+float inkSpacing = 1;
 
 // sand settings
-float sandSpacing = 2.5;
-int sandGrainsPerStep = 4;
-float sandSpread = 3.0;
+float sandSpacing = 1.5;
+int sandGrainsPerStep = 8;
+float sandSpread = drawWidth;
 float sandMinR = 0.8;
 float sandMaxR = 1.7;
 float sandAlpha = 22;
 
 // line settings
-float lineWeight = 2.0;
+float lineWeight = drawWidth;
 float MIN_LINE_SEG_PX = 0.8;
 
 // speed mapping
@@ -354,7 +356,8 @@ void nextStrokeColor() {
 }
 
 void setup() {
-  size(1000, 800);
+  //size(1000, 800);
+  fullScreen();
   smooth();
 
   loadConfig();
@@ -644,7 +647,7 @@ void drawInkSegment(PGraphics g, float x1, float y1, float x2, float y2) {
     float t = i / (float)steps;
     float px = lerp(x1, x2, t) + random(-jitter, jitter);
     float py = lerp(y1, y2, t) + random(-jitter, jitter);
-    g.ellipse(px, py, inkBrushR*2, inkBrushR*2);
+    g.ellipse(px, py, inkBrushR*lineWeight, inkBrushR*lineWeight);
   }
 
   g.blendMode(BLEND);
