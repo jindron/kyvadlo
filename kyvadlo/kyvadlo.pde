@@ -17,10 +17,10 @@ int ORIENT_ROT = 0;             // 0,1,2,3 => 0°,90°,180°,270°
 boolean ORIENT_FLIP_X = false;  // mirror X (left/right)
 boolean ORIENT_FLIP_Y = false;  // mirror Y (up/down)
 
-// jemná rotace v deg (typicky +/- pár stupňů)
-float ORIENT_FINE_DEG = 0.0;        // plynulé doladění
-float ORIENT_FINE_STEP = 0.5;       // coarse step (LEFT/RIGHT)
-float ORIENT_FINE_STEP_FINE = 0.1;  // SHIFT+LEFT/RIGHT
+// jemná rotace v deg
+float ORIENT_FINE_DEG = 0.0;
+float ORIENT_FINE_STEP = 1.0;
+float ORIENT_FINE_STEP_FINE = 1.0;
 
 static final float DEG2RAD = PI / 180.0;
 
@@ -56,14 +56,13 @@ String orientText() {
          " fine=" + nf(ORIENT_FINE_DEG, 0, 2) + "deg";
 }
 
-  // ============================
-  // CENTER OFFSET (px) - when TV center isn't under pendulum
-  // ============================
-  float CENTER_OFF_X_PX = 0.0;
-  float CENTER_OFF_Y_PX = 0.0;
-  float OFFS_STEP = 5.0;       // px per press
-  float OFFS_STEP_FINE = 1.0;  // SHIFT step
-
+// ============================
+// CENTER OFFSET (px) - when TV center isn't under pendulum
+// ============================
+float CENTER_OFF_X_PX = 0.0;
+float CENTER_OFF_Y_PX = 0.0;
+float OFFS_STEP = 5.0;       // px per press
+float OFFS_STEP_FINE = 1.0;  // SHIFT step
 
 // ============================
 // SCALE (ESP data)
@@ -80,16 +79,15 @@ float SCALE_MAX = 5000;
 // BACKSPACE resets selected param
 // ============================
 int EDIT_PARAM = 0;
-// 0=ROT90, 1=FLIP_X, 2=FLIP_Y, 3=FINE_DEG, 4=SCALE
-static final int EDIT_PARAM_COUNT = 7;
+// 0=ROT90, 1=FLIP_X, 2=FLIP_Y, 3=SCALE, 4=OFFS_X, 5=OFFS_Y
+static final int EDIT_PARAM_COUNT = 6;
 
 String editParamName() {
   if (EDIT_PARAM == 0) return "ROT90";
   if (EDIT_PARAM == 1) return "FLIP_X";
   if (EDIT_PARAM == 2) return "FLIP_Y";
-  if (EDIT_PARAM == 3) return "FINE_DEG";
-  if (EDIT_PARAM == 4) return "SCALE";
-  if (EDIT_PARAM == 5) return "OFFS_X";
+  if (EDIT_PARAM == 3) return "SCALE";
+  if (EDIT_PARAM == 4) return "OFFS_X";
   return "OFFS_Y";
 }
 
@@ -97,15 +95,62 @@ String editParamValue() {
   if (EDIT_PARAM == 0) return str(ORIENT_ROT * 90) + "deg";
   if (EDIT_PARAM == 1) return ORIENT_FLIP_X ? "ON" : "OFF";
   if (EDIT_PARAM == 2) return ORIENT_FLIP_Y ? "ON" : "OFF";
-  if (EDIT_PARAM == 3) return nf(ORIENT_FINE_DEG, 0, 2) + "deg";
-  if (EDIT_PARAM == 4) return nf(scaleFactor, 0, 2);
-  if (EDIT_PARAM == 5) return nf(CENTER_OFF_X_PX, 0, 1) + "px";
+  if (EDIT_PARAM == 3) return nf(scaleFactor, 0, 2);
+  if (EDIT_PARAM == 4) return nf(CENTER_OFF_X_PX, 0, 1) + "px";
   return nf(CENTER_OFF_Y_PX, 0, 1) + "px";
 }
 
 void editSelectNext() {
   EDIT_PARAM = (EDIT_PARAM + 1) % EDIT_PARAM_COUNT;
   println("Edit => " + editParamName() + " (" + editParamValue() + ")");
+}
+
+void adjustFineDegDirect(int dir) {
+  if (dir == 0) return;
+
+  ORIENT_FINE_DEG += dir * ORIENT_FINE_STEP;
+  saveConfig();
+
+  println("FINE_DEG => " + nf(ORIENT_FINE_DEG, 0, 2) + "deg | orient=" + orientText());
+}
+
+void drawCenterStatusOverlay() {
+  if (debugUI) return;
+
+  String msg = null;
+  int fillR = 255, fillG = 255, fillB = 255;
+
+  // priorita: kalibrace
+  if (status.equals("CALIBRATING")) {
+    msg = "KALIBRACE...";
+    fillR = 255; fillG = 220; fillB = 0;   // žlutá
+  }
+  // nepřipojené ESP jen když nejsme v SIM režimu
+  else if (!USE_SIM && myPort == null) {
+    msg = "ESP NENI PRIPOJENE";
+    fillR = 255; fillG = 60; fillB = 60;   // červená
+  }
+
+  if (msg == null) return;
+
+  pushStyle();
+  rectMode(CENTER);
+  textAlign(CENTER, CENTER);
+
+  float boxW = min(width * 0.72, 900);
+  float boxH = 110;
+  float cx = width * 0.5;
+  float cy = height * 0.5;
+
+  noStroke();
+  fill(0, 170);
+  rect(cx, cy, boxW, boxH, 18);
+
+  fill(fillR, fillG, fillB);
+  textSize(34);
+  text(msg, cx, cy - 4);
+
+  popStyle();
 }
 
 void editAdjust(int dir, boolean fineStep) {
@@ -121,16 +166,11 @@ void editAdjust(int dir, boolean fineStep) {
     ORIENT_FLIP_Y = !ORIENT_FLIP_Y;
 
   } else if (EDIT_PARAM == 3) {
-    float step = fineStep ? ORIENT_FINE_STEP_FINE : ORIENT_FINE_STEP;
-    ORIENT_FINE_DEG += dir * step;
-    ORIENT_FINE_DEG = constrain(ORIENT_FINE_DEG, -45.0, 45.0);
-
-  } else if (EDIT_PARAM == 4) {
     float step = fineStep ? SCALE_STEP_FINE : SCALE_STEP;
     scaleFactor += dir * step;
     scaleFactor = constrain(scaleFactor, SCALE_MIN, SCALE_MAX);
     
-  } else if (EDIT_PARAM == 5) { // OFFS_X
+  } else if (EDIT_PARAM == 4) { // OFFS_X
     float step = fineStep ? OFFS_STEP_FINE : OFFS_STEP;
     CENTER_OFF_X_PX += dir * step;
 
@@ -139,6 +179,7 @@ void editAdjust(int dir, boolean fineStep) {
     CENTER_OFF_Y_PX += dir * step;
   }
 
+  saveConfig();
   println("Edit => " + editParamName() + "=" + editParamValue() + " | orient=" + orientText() + " | scale=" + nf(scaleFactor, 0, 2));
 }
 
@@ -146,11 +187,11 @@ void editResetSelected() {
   if (EDIT_PARAM == 0) ORIENT_ROT = 0;
   else if (EDIT_PARAM == 1) ORIENT_FLIP_X = false;
   else if (EDIT_PARAM == 2) ORIENT_FLIP_Y = false;
-  else if (EDIT_PARAM == 3) ORIENT_FINE_DEG = 0.0;
-  else if (EDIT_PARAM == 4) autoFitScale(); // SCALE reset => autofit
-  else if (EDIT_PARAM == 5) CENTER_OFF_X_PX = 0.0;
+  else if (EDIT_PARAM == 3) autoFitScale(); // SCALE reset => autofit
+  else if (EDIT_PARAM == 4) CENTER_OFF_X_PX = 0.0;
   else CENTER_OFF_Y_PX = 0.0;
 
+  saveConfig();
   println("Reset => " + editParamName() + "=" + editParamValue() + " | orient=" + orientText() + " | scale=" + nf(scaleFactor, 0, 2));
 }
 
@@ -168,7 +209,6 @@ int simPointsPerFrameMax = 12;
 // SIM vykreslování VŽDY cca 300x300 px (nezávislé na scaleFactor)
 float simScalePx = 150.0;          // poloměr 150px => obrazec ~300x300
 float SIM_UNIT_CLAMP = 1.2;        // pojistka (clamp unit)
-
 
 // ---- Serial / reconnect ----
 String preferredPort = defaultPreferredPort();
@@ -357,9 +397,10 @@ void nextStrokeColor() {
 
 void setup() {
   //size(1000, 800);
-  fullScreen();
+  fullScreen(P2D);
   smooth();
-
+  frameRate(120);
+  
   loadConfig();
 
   canvasLayer = createGraphics(width, height);
@@ -463,6 +504,46 @@ void draw() {
     drawHUD();
     image(hud, 0, 0);
   }
+
+  drawCenterStatusOverlay();
+}
+
+void drawCenterStatusOverlay() {
+  // v SIM režimu nic nezobrazovat
+  if (USE_SIM) return;
+
+  String msg = null;
+  int fillR = 255, fillG = 255, fillB = 255;
+
+  if (status.equals("CALIBRATING")) {
+    msg = "KALIBRACE...";
+    fillR = 255; fillG = 220; fillB = 0;
+  }
+  else if (myPort == null) {
+    msg = "ESP NENI PRIPOJENE";
+    fillR = 255; fillG = 60; fillB = 60;
+  }
+
+  if (msg == null) return;
+
+  pushStyle();
+  rectMode(CENTER);
+  textAlign(CENTER, CENTER);
+
+  float boxW = min(width * 0.72, 900);
+  float boxH = 110;
+  float cx = width * 0.5;
+  float cy = height * 0.5;
+
+  noStroke();
+  fill(0, 170);
+  rect(cx, cy, boxW, boxH, 18);
+
+  fill(fillR, fillG, fillB);
+  textSize(34);
+  text(msg, cx, cy - 4);
+
+  popStyle();
 }
 
 // ============================
@@ -622,7 +703,7 @@ void drawLineSegment(PGraphics g, float x1, float y1, float x2, float y2) {
 }
 
 void drawInkSegment(PGraphics g, float x1, float y1, float x2, float y2) {
-// na černé pozadí: světelný štětec
+  // na černé pozadí: světelný štětec
   if (isBlackBG()) g.blendMode(ADD);
   else if (INK_MULTIPLY) g.blendMode(MULTIPLY);
   else g.blendMode(BLEND);
@@ -783,9 +864,20 @@ void drawHUD() {
   hud.textAlign(LEFT, TOP);
   hud.textSize(12);
 
+  float panelH = debugUI ? 70 : 22;
+
+  // šířka HUD boxu menší než celá obrazovka
+  float panelW = min(width * 0.82, 1200);
+  float panelX = (width - panelW) * 0.5;
+
+  // umístění přibližně do horní čtvrtiny obrazovky
+  float panelY = height * 0.25 - panelH * 0.5;
+
+  float textPadX = 12;
+
   hud.noStroke();
   hud.fill(0, 0, 0, 120);
-  hud.rect(0, 0, width, debugUI ? 70 : 22);
+  hud.rect(panelX, panelY, panelW, panelH);
 
   hud.fill(255);
   String srcText = USE_SIM ? ("SIM " + SIM_MODE) : "SERIAL";
@@ -808,7 +900,7 @@ void drawHUD() {
     " | bg:" + (bgIdx+1) + "/" + BG_COLORS.length +
     " | off=(" + nf(CENTER_OFF_X_PX,0,0) + "," + nf(CENTER_OFF_Y_PX,0,0) + ")px";
 
-  hud.text(line1, 10, 4);
+  hud.text(line1, panelX + textPadX, panelY + 4);
 
   if (debugUI) {
     String line2 =
@@ -818,15 +910,15 @@ void drawHUD() {
       " | " + xyText +
       " | px=" + nf(lastDrawX, 0, 1) + " py=" + nf(lastDrawY, 0, 1);
 
-    hud.text(line2, 10, 22);
+    hud.text(line2, panelX + textPadX, panelY + 22);
 
     String help1 =
       "Keys: D debug | T SIM/SERIAL | 1/2/3 sim mode | Q color | W render | E bg+clear | SPACE clear";
     String help2 =
-      "Edit: TAB select | \u2190/\u2192 change | SHIFT+\u2190/\u2192 fine | BACKSPACE reset | 0 autofit scale | S save cfg | C calibrate | R reconnect";
+      "Edit: TAB select | <-/-> change | BACKSPACE reset | Z/X fine_deg -/+1deg | 0 autofit scale | S save cfg | C calibrate | R reconnect";
 
-    hud.text(help1, 10, 40);
-    hud.text(help2, 10, 56);
+    hud.text(help1, panelX + textPadX, panelY + 40);
+    hud.text(help2, panelX + textPadX, panelY + 56);
   }
 
   hud.endDraw();
@@ -890,6 +982,16 @@ void serialEvent(Serial p) {
 void keyPressed() {
   if (key == 'd' || key == 'D') debugUI = !debugUI;
 
+  // přímé ovládání FINE_DEG bez TAB výběru
+  if (key == 'y' || key == 'Y') {
+    adjustFineDegDirect(-1);
+    return;
+  }
+  if (key == 'x' || key == 'X') {
+    adjustFineDegDirect(+1);
+    return;
+  }
+
   // --- PARAM editor ---
   if (key == TAB) {
     editSelectNext();
@@ -910,18 +1012,24 @@ void keyPressed() {
     return;
   }
 
-  if (key == '0') autoFitScale();
+  if (key == '0') {
+    autoFitScale();
+    saveConfig();
+  }
+
   if (key == 's' || key == 'S') saveConfig();
 
   if (key == 'q' || key == 'Q') {
     strokeColorIdx = (strokeColorIdx + 1) % STROKE_COLORS.length;
     if (!strokeColorAllowed(strokeColorIdx)) nextStrokeColor();
     applyStrokePalette();
+    saveConfig();
     println("STROKE_COLOR => " + (strokeColorIdx+1) + "/" + STROKE_COLORS.length);
   }
 
   if (key == 'w' || key == 'W') {
     RENDER_MODE = (RENDER_MODE + 1) % 3;
+    saveConfig();
     println("RENDER_MODE => " + renderModeName());
   }
 
@@ -929,6 +1037,7 @@ void keyPressed() {
     bgIdx = (bgIdx + 1) % BG_COLORS.length;
     applyBackgroundAndClear();
     if (!strokeColorAllowed(strokeColorIdx)) nextStrokeColor();
+    saveConfig();
     println("BACKGROUND => " + (bgIdx+1) + "/" + BG_COLORS.length + " (cleared)");
   }
 
@@ -1090,7 +1199,7 @@ void connectSerial() {
     }
 
     if (os.contains("win")) {
-      for (String p : candArr) {
+      for (String p : candArr) {;;
         if (p.startsWith("COM")) {
           preferredPort = p;
           myPort = new Serial(this, p, baud);
