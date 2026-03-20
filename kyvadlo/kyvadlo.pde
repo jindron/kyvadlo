@@ -115,20 +115,19 @@ void adjustFineDegDirect(int dir) {
 }
 
 void drawCenterStatusOverlay() {
-  if (debugUI) return;
+  // v SIM režimu nic nezobrazovat
+  if (USE_SIM) return;
 
   String msg = null;
   int fillR = 255, fillG = 255, fillB = 255;
 
-  // priorita: kalibrace
   if (status.equals("CALIBRATING")) {
     msg = "KALIBRACE...";
-    fillR = 255; fillG = 220; fillB = 0;   // žlutá
+    fillR = 255; fillG = 220; fillB = 0;
   }
-  // nepřipojené ESP jen když nejsme v SIM režimu
-  else if (!USE_SIM && myPort == null) {
+  else if (myPort == null) {
     msg = "ESP NENI PRIPOJENE";
-    fillR = 255; fillG = 60; fillB = 60;   // červená
+    fillR = 255; fillG = 60; fillB = 60;
   }
 
   if (msg == null) return;
@@ -504,46 +503,9 @@ void draw() {
     drawHUD();
     image(hud, 0, 0);
   }
-
+  
   drawCenterStatusOverlay();
-}
-
-void drawCenterStatusOverlay() {
-  // v SIM režimu nic nezobrazovat
-  if (USE_SIM) return;
-
-  String msg = null;
-  int fillR = 255, fillG = 255, fillB = 255;
-
-  if (status.equals("CALIBRATING")) {
-    msg = "KALIBRACE...";
-    fillR = 255; fillG = 220; fillB = 0;
-  }
-  else if (myPort == null) {
-    msg = "ESP NENI PRIPOJENE";
-    fillR = 255; fillG = 60; fillB = 60;
-  }
-
-  if (msg == null) return;
-
-  pushStyle();
-  rectMode(CENTER);
-  textAlign(CENTER, CENTER);
-
-  float boxW = min(width * 0.72, 900);
-  float boxH = 110;
-  float cx = width * 0.5;
-  float cy = height * 0.5;
-
-  noStroke();
-  fill(0, 170);
-  rect(cx, cy, boxW, boxH, 18);
-
-  fill(fillR, fillG, fillB);
-  textSize(34);
-  text(msg, cx, cy - 4);
-
-  popStyle();
+  
 }
 
 // ============================
