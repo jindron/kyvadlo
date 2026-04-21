@@ -122,11 +122,11 @@ void drawCenterStatusOverlay() {
   int fillR = 255, fillG = 255, fillB = 255;
 
   if (status.equals("CALIBRATING")) {
-    msg = "KALIBRACE...";
+    msg = "KALIBRACE...\n!!! ZASTAVTE KYVADLO !!!";
     fillR = 255; fillG = 220; fillB = 0;
   }
   else if (myPort == null) {
-    msg = "ESP NENI PRIPOJENE";
+    msg = "KYVADLO NENI PRIPOJENE\n!!! ZKONTROLUJTE JEHO PRIPOJENI !!!";
     fillR = 255; fillG = 60; fillB = 60;
   }
 
@@ -267,11 +267,10 @@ float driftVX = 0, driftVY = 0;
 // ============================
 // RENDER modes (0=line, 1=brush, 2=sand)
 // ============================
-int RENDER_MODE = 1; // default BRUSH
+int RENDER_MODE = 0; // default BRUSH
 
 String renderModeName() {
-  if (RENDER_MODE == 0) return "LINE";
-  if (RENDER_MODE == 1) return "BRUSH";
+  if (RENDER_MODE == 0) return "BRUSH";
   return "SAND";
 }
 
@@ -438,16 +437,17 @@ void draw() {
       PVector p = queue.removeFirst();
 
       if (havePrev) {
+//        if (RENDER_MODE == 0) {
+//          drawLineSegment(canvasLayer, prevX, prevY, p.x, p.y);
+//        } else 
         if (RENDER_MODE == 0) {
-          drawLineSegment(canvasLayer, prevX, prevY, p.x, p.y);
-        } else if (RENDER_MODE == 1) {
           drawInkSegment(canvasLayer, prevX, prevY, p.x, p.y);
         } else {
           drawSandSegment(canvasLayer, prevX, prevY, p.x, p.y);
         }
         segmentsDrawn++;
       } else {
-        havePrev = true;
+        havePrev = true;;
       }
 
       prevX = p.x; prevY = p.y;
@@ -902,6 +902,7 @@ void serialEvent(Serial p) {
     lastDataMs = millis();
 
     if (line.equals("CALIB_START")) { status = "CALIBRATING"; return; }
+    if (line.equals("CALIB_WAIT")) { status = "CALIBRATING"; return; }
     if (line.equals("CALIB_OK"))    { status = "RUN"; return; }
 
     if (line.equals("x,y")) return;
@@ -990,7 +991,7 @@ void keyPressed() {
   }
 
   if (key == 'w' || key == 'W') {
-    RENDER_MODE = (RENDER_MODE + 1) % 3;
+    RENDER_MODE = (RENDER_MODE + 1) % 2;
     saveConfig();
     println("RENDER_MODE => " + renderModeName());
   }
