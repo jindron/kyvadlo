@@ -846,7 +846,7 @@ void drawHUD() {
   String portText = (myPort == null) ? "DISCONNECTED" : ("OK " + preferredPort);
 
   String xyText = haveXY
-    ? ("x=" + nf(lastX, 0, 2) + " y=" + nf(lastY, 0, 2))
+    ? ("x=" + nf(lastX, 0, 6) + " y=" + nf(lastY, 0, 6))
     : "x,y=...";
 
   String line1 =
