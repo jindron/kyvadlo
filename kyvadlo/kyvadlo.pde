@@ -206,7 +206,7 @@ float simRateHz = 200;
 int simPointsPerFrameMax = 12;
 
 // SIM vykreslování VŽDY cca 300x300 px (nezávislé na scaleFactor)
-float simScalePx = 150.0;          // poloměr 150px => obrazec ~300x300
+float simScalePx = 500.0;          // poloměr 150px => obrazec ~300x300
 float SIM_UNIT_CLAMP = 1.2;        // pojistka (clamp unit)
 
 // ---- Serial / reconnect ----
@@ -256,8 +256,7 @@ int lastLogMs = 0;
 // ============================
 // SIM state
 // ============================
-float simT = 0;
-float simCarry = 0;
+
 float rwX = 0, rwY = 0;
 
 // drift (unit)
@@ -733,8 +732,25 @@ void drawSandSegment(PGraphics g, float x1, float y1, float x2, float y2) {
 }
 
 // ============================
-// SIM generator -> queue
+// SIM state (harmonograf - tlumené kyvadlo)
 // ============================
+// --- fyzikální model kyvadla (integrace pohybové rovnice) ---
+// stav (poloha + rychlost v "unit" rozsahu)
+float penX = 0, penY = 0;
+float penVX = 0, penVY = 0;
+float simCarry = 0;
+
+// tuhost (vlastní frekvence). X a Y skoro stejné => pomalu rotující elipsa
+float PEN_KX = 14.0;
+float PEN_KY = 13.86;
+
+// tlumení (čím menší, tím déle kreslí)
+float PEN_DAMP = 0.04;   // ZMENŠI pro delší/hustší obrazec (např. 0.02)
+
+// kolik fyzikálních sub-kroků na jeden vygenerovaný bod (přesnost integrace)
+int PEN_SUBSTEPS = 8;
+
+
 void generateSimPoints() {
   float dt = 1.0 / max(frameRate, 1.0);
   simCarry += simRateHz * dt;
@@ -743,67 +759,33 @@ void generateSimPoints() {
   if (toGen <= 0) return;
 
   simCarry -= toGen;
-  float step = 1.0 / simRateHz;
 
-  float driftAccel = 0.010;
-  float driftDamp  = 0.995;
-  float driftMaxV  = 0.06;
-  float driftMaxR  = 0.20;
-  float noiseAmp   = 0.004;
+  // časový krok jednoho vygenerovaného bodu
+  float pointDt = 1.0 / simRateHz;
+  // sub-krok integrace
+  float h = pointDt / PEN_SUBSTEPS;
 
   for (int i = 0; i < toGen; i++) {
-    simT += step;
 
-    float x = 0, y = 0;
-
-    if (SIM_MODE == 1) {
-      float ax = 90, ay = 70;
-      float fx = 2.0, fy = 3.0;
-      float phase = PI/3;
-      x = ax * sin(TWO_PI * fx * simT + phase);
-      y = ay * sin(TWO_PI * fy * simT);
-
-    } else if (SIM_MODE == 2) {
-      float R = 90, r = 35, d = 60;
-      float t = TWO_PI * 0.20 * simT;
-      x = (R - r) * cos(t) + d * cos(((R - r) / r) * t);
-      y = (R - r) * sin(t) - d * sin(((R - r) / r) * t);
-
-    } else {
-      float stepSize = 2.5;
-      rwX += random(-stepSize, stepSize);
-      rwY += random(-stepSize, stepSize);
-      rwX = constrain(rwX, -120, 120);
-      rwY = constrain(rwY, -120, 120);
-      x = rwX; y = rwY;
+    // integrace pohybové rovnice: a = -k*pos - c*vel
+    for (int s = 0; s < PEN_SUBSTEPS; s++) {
+      float ax = -PEN_KX * penX - PEN_DAMP * penVX;
+      float ay = -PEN_KY * penY - PEN_DAMP * penVY;
+      penVX += ax * h;
+      penVY += ay * h;
+      penX  += penVX * h;
+      penY  += penVY * h;
     }
 
-    x *= SIM_GAIN;
-    y *= SIM_GAIN;
-
-    driftVX += random(-driftAccel, driftAccel) * step;
-    driftVY += random(-driftAccel, driftAccel) * step;
-    driftVX *= driftDamp;
-    driftVY *= driftDamp;
-    driftVX = constrain(driftVX, -driftMaxV, driftMaxV);
-    driftVY = constrain(driftVY, -driftMaxV, driftMaxV);
-    driftX += driftVX;
-    driftY += driftVY;
-    driftX = constrain(driftX, -driftMaxR, driftMaxR);
-    driftY = constrain(driftY, -driftMaxR, driftMaxR);
-
-    x += driftX + random(-noiseAmp, noiseAmp);
-    y += driftY + random(-noiseAmp, noiseAmp);
-
-    x = constrain(x, -SIM_UNIT_CLAMP, SIM_UNIT_CLAMP);
-    y = constrain(y, -SIM_UNIT_CLAMP, SIM_UNIT_CLAMP);
+    float x = constrain(penX, -SIM_UNIT_CLAMP, SIM_UNIT_CLAMP);
+    float y = constrain(penY, -SIM_UNIT_CLAMP, SIM_UNIT_CLAMP);
 
     PVector o = orientXY(x, y);
     x = o.x; y = o.y;
 
     float cx = width/2 + CENTER_OFF_X_PX;
     float cy = height/2 + CENTER_OFF_Y_PX;
-    
+
     float drawX = cx + x * simScalePx;
     float drawY = cy - y * simScalePx;
 
@@ -818,6 +800,41 @@ void generateSimPoints() {
 
     while (queue.size() > 12000) queue.removeFirst();
   }
+}
+
+// restart kyvadla od plné amplitudy
+void simReset() {
+  simCarry = 0;
+  havePrev = false;
+
+  // --- náhodné "strčení" do kyvadla ---
+
+  // vlastní frekvence + malé rozladění mezi osami (dělá rotaci elipsy)
+  float baseK = random(8.0, 22.0);          // celková rychlost kmitání
+  float detune = random(0.005, 0.06);       // rozdíl X/Y => jak rychle elipsa rotuje
+  PEN_KX = baseK * (1.0 + detune * 0.5);
+  PEN_KY = baseK * (1.0 - detune * 0.5);
+
+  // tlumení => jak dlouho kreslí
+  PEN_DAMP = random(0.05, 0.08);
+
+// počáteční poloha (kam kyvadlo "vytáhneme")
+  float ampPos = random(0.5, 0.85);
+  float angPos = random(TWO_PI);
+  penX = ampPos * cos(angPos);
+  penY = ampPos * sin(angPos);
+
+  // počáteční rychlost - směr náhodný (mění tvar), ale velikost svázaná s polohou
+  // v_max ≈ sqrt(k) * amplituda, takže to nikdy nepřeletí přes ampPos
+  float velMag = ampPos * sqrt(baseK) * random(0.4, 1.0);
+  float angVel = random(TWO_PI);   // náhodný směr => různé tvary (úsečka..elipsa..kruh)
+  penVX = velMag * cos(angVel);
+  penVY = velMag * sin(angVel);
+  println("Nove rozkyvani: KX=" + nf(PEN_KX,0,2) +
+          " KY=" + nf(PEN_KY,0,2) +
+          " damp=" + nf(PEN_DAMP,0,3) +
+          " pos=(" + nf(penX,0,2) + "," + nf(penY,0,2) + ")" +
+          " vel=(" + nf(penVX,0,2) + "," + nf(penVY,0,2) + ")");
 }
 
 void drawHUD() {
@@ -1014,6 +1031,7 @@ void keyPressed() {
     if (USE_SIM) {
       disconnectSerial();
       status = "RUN";
+      simReset();
     } else {
       println(Serial.list());
       connectSerial();
@@ -1036,7 +1054,10 @@ void keyPressed() {
     }
   }
 
-  if (key == ' ') applyBackgroundAndClear();
+  if (key == ' ') {
+    applyBackgroundAndClear();
+    if (USE_SIM) simReset();   // smaž + rozkývej znovu od plné amplitudy
+  }
 }
 
 void sendCalibrate() {
