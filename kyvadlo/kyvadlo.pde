@@ -115,41 +115,38 @@ void adjustFineDegDirect(int dir) {
 }
 
 void drawCenterStatusOverlay() {
-  // v SIM režimu nic nezobrazovat
-  if (USE_SIM) return;
-
-  String msg = null;
-  int fillR = 255, fillG = 255, fillB = 255;
-
+  // KALIBRACE - výrazně, vždy (i kdyby byl SIM omylem aktivní)
   if (status.equals("CALIBRATING")) {
-    msg = "KALIBRACE...\n!!! ZASTAVTE KYVADLO !!!";
-    fillR = 255; fillG = 220; fillB = 0;
+    pushStyle();
+    rectMode(CENTER);
+    textAlign(CENTER, CENTER);
+
+    float boxW = min(width * 0.72, 900);
+    float boxH = 110;
+    float cx = width * 0.5;
+    float cy = height * 0.5;
+
+    noStroke();
+    fill(0, 170);
+    rect(cx, cy, boxW, boxH, 18);
+
+    fill(255, 220, 0);   // žlutá
+    textSize(34);
+    text("KALIBRACE...\n!!! ZASTAVTE KYVADLO !!!", cx, cy - 4);
+
+    popStyle();
+    return;
   }
-  else if (myPort == null) {
-    msg = "KYVADLO NENI PRIPOJENE\n!!! ZKONTROLUJTE JEHO PRIPOJENI !!!";
-    fillR = 255; fillG = 60; fillB = 60;
+
+  // "chybí ESP" - jen malý šedý nápis a jen když NEJSME v SIM
+  if (!USE_SIM && myPort == null) {
+    pushStyle();
+    textAlign(LEFT, BOTTOM);
+    textSize(16);
+    fill(150);
+    text("KYVADLO NENI PRIPOJENE", 14, height - 14);
+    popStyle();                                                                                                                                                                                                                                                                                                                     
   }
-
-  if (msg == null) return;
-
-  pushStyle();
-  rectMode(CENTER);
-  textAlign(CENTER, CENTER);
-
-  float boxW = min(width * 0.72, 900);
-  float boxH = 110;
-  float cx = width * 0.5;
-  float cy = height * 0.5;
-
-  noStroke();
-  fill(0, 170);
-  rect(cx, cy, boxW, boxH, 18);
-
-  fill(fillR, fillG, fillB);
-  textSize(34);
-  text(msg, cx, cy - 4);
-
-  popStyle();
 }
 
 void editAdjust(int dir, boolean fineStep) {
@@ -199,6 +196,10 @@ void editResetSelected() {
 // ============================
 boolean USE_SIM = false;          // false = ESP, true = simulace
 int SIM_MODE = 1;                 // 1=Lissajous, 2=Spiro, 3=Random walk
+
+// Auto-fallback stav
+boolean autoSim = false;          // true = SIM běží kvůli chybějícímu ESP (ne ručně)
+boolean manualSerial = false;     // true = uživatel ručně vynutil SERIAL (T), nechce auto-SIM
 
 // SIM hodnoty chceme v "unit" rozsahu jako ESP (cca -1..1)
 float SIM_GAIN = 0.008;   // 90 * 0.008 = 0.72
@@ -416,6 +417,7 @@ void setup() {
   } else {
     status = "RUN";
     rwX = 0; rwY = 0;
+    simReset();
   }
 
   lastDataMs = millis();
@@ -423,7 +425,8 @@ void setup() {
 }
 
 void draw() {
-  if (!USE_SIM) ensureConnected();
+  // Zkoušej se připojit k ESP i během auto-SIMu (aby se mohl vrátit na SERIAL)
+  if (!USE_SIM || autoSim) ensureConnected();
 
   if (USE_SIM) generateSimPoints();
 
@@ -472,6 +475,27 @@ void draw() {
     }
   }
 
+  // ============================
+  // AUTO-FALLBACK: ESP chybí -> SIM; ESP se objeví -> SERIAL
+  // ============================
+  if (!USE_SIM && myPort == null && !manualSerial) {
+    USE_SIM = true;
+    autoSim = true;
+    havePrev = false;
+    queue.clear();
+    simReset();
+    status = "RUN";
+    println("ESP nepripojeno -> AUTO SIM");
+  }
+  else if (USE_SIM && autoSim && myPort != null) {
+    USE_SIM = false;
+    autoSim = false;
+    havePrev = false;
+    queue.clear();
+    status = "WAITING";
+    println("ESP pripojeno -> zpet na SERIAL");
+  }
+
   if (!USE_SIM && status.equals("RUN") && millis() - lastDataMs > 1500) {
     status = "WAITING";
   }
@@ -484,7 +508,7 @@ void draw() {
       " seg/s=" + segmentsDrawn +
       " queue=" + queue.size() +
       " seg/frame=" + segmentsPerFrame +
-      " src=" + (USE_SIM ? ("SIM(mode " + SIM_MODE + ")") : ("SERIAL(" + (myPort == null ? "DISCONNECTED" : preferredPort) + ")")) +
+      " src=" + (USE_SIM ? ("SIM" + (autoSim ? "(auto)" : "")) : ("SERIAL(" + (myPort == null ? "DISCONNECTED" : preferredPort) + ")")) +
       " render=" + renderModeName() +
       " strokeColorIdx=" + strokeColorIdx +
       " bgIdx=" + bgIdx +
@@ -732,9 +756,8 @@ void drawSandSegment(PGraphics g, float x1, float y1, float x2, float y2) {
 }
 
 // ============================
-// SIM state (harmonograf - tlumené kyvadlo)
+// SIM state (fyzikální model kyvadla - integrace pohybové rovnice)
 // ============================
-// --- fyzikální model kyvadla (integrace pohybové rovnice) ---
 // stav (poloha + rychlost v "unit" rozsahu)
 float penX = 0, penY = 0;
 float penVX = 0, penVY = 0;
@@ -818,7 +841,7 @@ void simReset() {
   // tlumení => jak dlouho kreslí
   PEN_DAMP = random(0.05, 0.08);
 
-// počáteční poloha (kam kyvadlo "vytáhneme")
+  // počáteční poloha (kam kyvadlo "vytáhneme")
   float ampPos = random(0.5, 0.85);
   float angPos = random(TWO_PI);
   penX = ampPos * cos(angPos);
@@ -830,6 +853,7 @@ void simReset() {
   float angVel = random(TWO_PI);   // náhodný směr => různé tvary (úsečka..elipsa..kruh)
   penVX = velMag * cos(angVel);
   penVY = velMag * sin(angVel);
+
   println("Nove rozkyvani: KX=" + nf(PEN_KX,0,2) +
           " KY=" + nf(PEN_KY,0,2) +
           " damp=" + nf(PEN_DAMP,0,3) +
@@ -859,7 +883,7 @@ void drawHUD() {
   hud.rect(panelX, panelY, panelW, panelH);
 
   hud.fill(255);
-  String srcText = USE_SIM ? ("SIM " + SIM_MODE) : "SERIAL";
+  String srcText = USE_SIM ? ("SIM" + (autoSim ? "(auto)" : "")) : "SERIAL";
   String portText = (myPort == null) ? "DISCONNECTED" : ("OK " + preferredPort);
 
   String xyText = haveXY
@@ -1023,16 +1047,19 @@ void keyPressed() {
 
   if (key == 't' || key == 'T') {
     USE_SIM = !USE_SIM;
+    autoSim = false;   // od teď je to ruční volba
     println("TOGGLE source => " + (USE_SIM ? "SIM" : "SERIAL"));
 
     havePrev = false;
     queue.clear();
 
     if (USE_SIM) {
+      manualSerial = false;   // ručně SIM
       disconnectSerial();
       status = "RUN";
       simReset();
     } else {
+      manualSerial = true;    // ručně SERIAL => nechci auto-SIM
       println(Serial.list());
       connectSerial();
       status = "WAITING";
@@ -1071,7 +1098,7 @@ void sendCalibrate() {
 // Serial reconnect helpers
 // --------------------
 void ensureConnected() {
-  if (USE_SIM) return;
+  // V auto-SIMu se sem dostaneme schválně, abychom zkoušeli připojit ESP.
   if (myPort != null) return;
 
   int now = millis();
