@@ -138,15 +138,8 @@ void drawCenterStatusOverlay() {
     return;
   }
 
-  // "chybí ESP" - jen malý šedý nápis a jen když NEJSME v SIM
-  if (!USE_SIM && myPort == null) {
-    pushStyle();
-    textAlign(LEFT, BOTTOM);
-    textSize(16);
-    fill(150);
-    text("KYVADLO NENI PRIPOJENE", 14, height - 14);
-    popStyle();                                                                                                                                                                                                                                                                                                                     
-  }
+  // Chybějící / rozbité ESP se záměrně nijak nehlásí - místo toho běží auto-SIM.
+  // Stav je vidět jen v debug HUD (klávesa D).
 }
 
 void editAdjust(int dir, boolean fineStep) {
@@ -201,13 +194,23 @@ int SIM_MODE = 1;                 // 1=Lissajous, 2=Spiro, 3=Random walk
 boolean autoSim = false;          // true = SIM běží kvůli chybějícímu ESP (ne ručně)
 boolean manualSerial = false;     // true = uživatel ručně vynutil SERIAL (T), nechce auto-SIM
 
+// Kdy je ESP "živé": jen když posílá platné souřadnice nebo kalibrační zprávy (CALIB_*).
+// Otevřený port, ticho nebo jen chybové hlášky (ERR,...) nestačí -> běží simulace.
+// Zapisuje serial vlákno (serialEvent), čte draw vlákno -> volatile.
+volatile int espValidMs = -100000;       // čas posledního platného řádku z ESP
+volatile boolean espValidCalib = false;  // ten řádek byl kalibrační (ESP právě kalibruje)
+volatile int lastSerialLineMs = 0;       // čas posledního jakéhokoli řádku (watchdog portu)
+int espLostMs = 3000;                    // SERIAL -> SIM, když tak dlouho nepřišel platný řádek
+int simSwitchedMs = 0;                   // kdy se naposledy přešlo do auto-SIM
+
 // SIM hodnoty chceme v "unit" rozsahu jako ESP (cca -1..1)
 float SIM_GAIN = 0.008;   // 90 * 0.008 = 0.72
 float simRateHz = 200;
 int simPointsPerFrameMax = 12;
 
-// SIM vykreslování VŽDY cca 300x300 px (nezávislé na scaleFactor)
-float simScalePx = 500.0;          // poloměr 150px => obrazec ~300x300
+// SIM vykreslování v pixelech nezávisle na scaleFactor (unit 1.0 = simScalePx).
+// V setup() se zmenší, aby se největší rozkývání vešlo na obrazovku.
+float simScalePx = 500.0;
 float SIM_UNIT_CLAMP = 1.2;        // pojistka (clamp unit)
 
 // ---- Serial / reconnect ----
@@ -229,6 +232,8 @@ int connectGraceMs = 2500;
 int lastConnectMs = 0;
 
 // ---- kreslení ----
+boolean canvasDirty = false;   // na plátně je něco nakreslené (od posledního smazání)
+boolean simDirty = false;      // ... a kreslila to simulace
 boolean havePrev = false;
 float prevX, prevY;
 ArrayDeque<PVector> queue = new ArrayDeque<PVector>();
@@ -411,13 +416,14 @@ void setup() {
 
   applyStrokePalette();
 
+  // největší simulované rozkývání (SIM_AMP_MAX) se musí vejít na obrazovku
+  simScalePx = min(simScalePx, 0.47 * min(width, height) / SIM_AMP_MAX);
+
   if (!USE_SIM) {
     println(Serial.list());
-    connectSerial();
+    connectSerial();   // když ESP nepošle nic platného, draw() do pár s přepne na auto-SIM
   } else {
-    status = "RUN";
-    rwX = 0; rwY = 0;
-    simReset();
+    simStart(false);
   }
 
   lastDataMs = millis();
@@ -428,7 +434,7 @@ void draw() {
   // Zkoušej se připojit k ESP i během auto-SIMu (aby se mohl vrátit na SERIAL)
   if (!USE_SIM || autoSim) ensureConnected();
 
-  if (USE_SIM) generateSimPoints();
+  if (USE_SIM) updateSim();
 
   int n = 0;
   if (!queue.isEmpty()) {
@@ -448,8 +454,9 @@ void draw() {
           drawSandSegment(canvasLayer, prevX, prevY, p.x, p.y);
         }
         segmentsDrawn++;
+        canvasDirty = true;
       } else {
-        havePrev = true;;
+        havePrev = true;
       }
 
       prevX = p.x; prevY = p.y;
@@ -463,37 +470,47 @@ void draw() {
   else if (queue.size() > 250) segmentsPerFrame = 35;
   else segmentsPerFrame = 20;
 
-  if (!USE_SIM && myPort != null) {
+  // Watchdog portu: když otevřeným portem nic nechodí, zavři ho a zkoušej znovu.
+  // Běží i v auto-SIMu, aby se zaseknutý port neblokoval (pak se ESP nemohlo vrátit).
+  if ((!USE_SIM || autoSim) && myPort != null) {
     int now = millis();
     boolean inGrace = (now - lastConnectMs) < connectGraceMs;
-    boolean timedOut = (now - lastDataMs) > noDataDisconnectMs;
+    boolean timedOut = (now - lastSerialLineMs) > noDataDisconnectMs;
 
     if (!inGrace && timedOut) {
-      println("No data for " + (now - lastDataMs) + "ms -> disconnect & auto-reconnect");
+      println("No data for " + (now - lastSerialLineMs) + "ms -> disconnect & auto-reconnect");
       disconnectSerial();
-      status = "ERROR";
+      if (!USE_SIM) status = "ERROR";
     }
   }
 
   // ============================
-  // AUTO-FALLBACK: ESP chybí -> SIM; ESP se objeví -> SERIAL
+  // AUTO-SIM: ESP nic platného neposílá -> SIM; ESP se ozve platnými daty -> SERIAL
   // ============================
-  if (!USE_SIM && myPort == null && !manualSerial) {
-    USE_SIM = true;
-    autoSim = true;
-    havePrev = false;
-    queue.clear();
-    simReset();
-    status = "RUN";
-    println("ESP nepripojeno -> AUTO SIM");
-  }
-  else if (USE_SIM && autoSim && myPort != null) {
-    USE_SIM = false;
-    autoSim = false;
-    havePrev = false;
-    queue.clear();
-    status = "WAITING";
-    println("ESP pripojeno -> zpet na SERIAL");
+  if (!manualSerial) {
+    int nowA = millis();
+    if (!USE_SIM) {
+      // od připojení / posledního platného řádku uplynulo moc času (port chybí, ESP mlčí,
+      // nebo posílá jen ERR,... např. při rozbitém senzoru)
+      int lastGood = max(espValidMs, lastConnectMs);
+      if (myPort == null || nowA - lastGood > espLostMs) {
+        println("ESP neposila platna data -> AUTO SIM" + (myPort == null ? " (port chybi)" : " (port zustava otevreny)"));
+        USE_SIM = true;
+        autoSim = true;
+        simSwitchedMs = nowA;
+        simStart(canvasDirty);   // rozkreslenou kresbu z ESP nech chvíli na obrazovce
+      }
+    }
+    else if (autoSim && myPort != null && espValidMs - simSwitchedMs > 0) {
+      println("ESP posila platna data -> zpet na SERIAL");
+      USE_SIM = false;
+      autoSim = false;
+      if (simDirty) applyBackgroundAndClear();   // simulovanou kresbu smaž
+      havePrev = false;
+      queue.clear();
+      lastDataMs = nowA;
+      status = espValidCalib ? "CALIBRATING" : "RUN";
+    }
   }
 
   if (!USE_SIM && status.equals("RUN") && millis() - lastDataMs > 1500) {
@@ -653,6 +670,8 @@ void applyBackgroundAndClear() {
   canvasLayer.background(b[0], b[1], b[2]);
   canvasLayer.endDraw();
 
+  canvasDirty = false;
+  simDirty = false;
   havePrev = false;
   queue.clear();
 }
@@ -773,6 +792,59 @@ float PEN_DAMP = 0.04;   // ZMENŠI pro delší/hustší obrazec (např. 0.02)
 // kolik fyzikálních sub-kroků na jeden vygenerovaný bod (přesnost integrace)
 int PEN_SUBSTEPS = 8;
 
+// rozsah počáteční amplitudy (unit) při novém rozkývání
+float SIM_AMP_MIN = 0.5;
+float SIM_AMP_MAX = 0.85;
+
+// ---- cyklus simulace: kývání -> dokmitá -> pauza s hotovou kresbou -> smazat -> nové kývání ----
+final int SIM_SWING = 0;
+final int SIM_HOLD = 1;
+int simPhase = SIM_SWING;
+int simPhaseMs = 0;            // kdy začala aktuální fáze
+float SIM_END_AMP = 0.03;      // amplituda (unit), pod kterou je kyvadlo "dokmitané"
+int SIM_HOLD_MS = 10000;       // jak dlouho nechat hotovou kresbu, než se smaže
+
+// Spustí simulaci. holdFirst = true: stávající kresbu (např. rozkreslenou z ESP) nech ještě
+// SIM_HOLD_MS na obrazovce a smaž ji až pak; jinak smaž hned a rozkývej.
+void simStart(boolean holdFirst) {
+  queue.clear();
+  havePrev = false;
+  status = "RUN";
+  if (holdFirst) {
+    simPhase = SIM_HOLD;
+    simPhaseMs = millis();
+    println("SIM: pauza " + SIM_HOLD_MS + " ms, pak nove rozkyvani");
+  } else {
+    simNewSwing();
+  }
+}
+
+// Smaže plátno a náhodně rozkývá kyvadlo s novými parametry.
+void simNewSwing() {
+  applyBackgroundAndClear();
+  simReset();
+  simPhase = SIM_SWING;
+  simPhaseMs = millis();
+}
+
+// Volá se každý frame, když běží SIM (ruční i auto).
+void updateSim() {
+  if (simPhase == SIM_SWING) {
+    generateSimPoints();
+    if (simAmplitude() < SIM_END_AMP) {
+      println("SIM: dokmitano po " + ((millis() - simPhaseMs) / 1000) + " s -> pauza " + SIM_HOLD_MS + " ms");
+      simPhase = SIM_HOLD;
+      simPhaseMs = millis();
+    }
+  } else if (millis() - simPhaseMs >= SIM_HOLD_MS) {
+    simNewSwing();
+  }
+}
+
+// Amplituda tlumeného oscilátoru (unit): pro každou osu sqrt(x^2 + v^2/k).
+float simAmplitude() {
+  return sqrt(penX*penX + penVX*penVX / PEN_KX + penY*penY + penVY*penVY / PEN_KY);
+}
 
 void generateSimPoints() {
   float dt = 1.0 / max(frameRate, 1.0);
@@ -817,6 +889,7 @@ void generateSimPoints() {
     haveXY = true;
 
     queue.addLast(new PVector(drawX, drawY));
+    simDirty = true;
     lastDataMs = millis();
     status = "RUN";
     linesIn++;
@@ -842,17 +915,25 @@ void simReset() {
   PEN_DAMP = random(0.05, 0.08);
 
   // počáteční poloha (kam kyvadlo "vytáhneme")
-  float ampPos = random(0.5, 0.85);
+  float ampPos = random(SIM_AMP_MIN, SIM_AMP_MAX);
   float angPos = random(TWO_PI);
   penX = ampPos * cos(angPos);
   penY = ampPos * sin(angPos);
 
-  // počáteční rychlost - směr náhodný (mění tvar), ale velikost svázaná s polohou
-  // v_max ≈ sqrt(k) * amplituda, takže to nikdy nepřeletí přes ampPos
+  // počáteční rychlost - směr náhodný (mění tvar), velikost svázaná s polohou
   float velMag = ampPos * sqrt(baseK) * random(0.4, 1.0);
   float angVel = random(TWO_PI);   // náhodný směr => různé tvary (úsečka..elipsa..kruh)
   penVX = velMag * cos(angVel);
   penVY = velMag * sin(angVel);
+
+  // Rychlost amplitudu zvětšuje (až ~1.4x ampPos) -> přeškáluj polohu i rychlost tak,
+  // aby celková amplituda byla přesně ampPos. Tvar zůstane, nepřeletí přes okraj obrazovky.
+  float a0 = simAmplitude();
+  if (a0 > 0.0001) {
+    float s = ampPos / a0;
+    penX *= s;  penY *= s;
+    penVX *= s; penVY *= s;
+  }
 
   println("Nove rozkyvani: KX=" + nf(PEN_KX,0,2) +
           " KY=" + nf(PEN_KY,0,2) +
@@ -883,7 +964,9 @@ void drawHUD() {
   hud.rect(panelX, panelY, panelW, panelH);
 
   hud.fill(255);
-  String srcText = USE_SIM ? ("SIM" + (autoSim ? "(auto)" : "")) : "SERIAL";
+  String srcText = USE_SIM
+    ? ("SIM" + (autoSim ? "(auto)" : "") + (simPhase == SIM_HOLD ? " pauza" : " amp=" + nf(simAmplitude(), 0, 3)))
+    : "SERIAL";
   String portText = (myPort == null) ? "DISCONNECTED" : ("OK " + preferredPort);
 
   String xyText = haveXY
@@ -931,56 +1014,72 @@ void drawHUD() {
 // SERIAL handling
 // ============================
 void serialEvent(Serial p) {
-  if (USE_SIM) return;
+  // Ruční SIM: ESP ignorovat. V auto-SIMu ESP dál posloucháme, jen jeho data nekreslíme -
+  // draw() podle espValidMs pozná, že se ESP vrátilo, a přepne zpět na SERIAL.
+  if (USE_SIM && !autoSim) return;
 
   try {
     String line = p.readStringUntil('\n');
     if (line == null) return;
-
-    line = trim(line);
-    if (line.length() == 0) return;
-
-    lastDataMs = millis();
-
-    if (line.equals("CALIB_START")) { status = "CALIBRATING"; return; }
-    if (line.equals("CALIB_WAIT")) { status = "CALIBRATING"; return; }
-    if (line.equals("CALIB_OK"))    { status = "RUN"; return; }
-
-    if (line.equals("x,y")) return;
-    if (line.startsWith("OK,")) return;
-    if (line.startsWith("ERR,")) { status = "ERROR"; return; }
-    if (line.equals("CLR_OK")) return;
-
-    String[] parts = split(line, ',');
-    if (parts.length != 2) return;
-
-    float x = float(parts[0]);
-    float y = float(parts[1]);
-
-    PVector o = orientXY(x, y);
-    x = o.x; y = o.y;
-
-    float cx = width/2 + CENTER_OFF_X_PX;
-    float cy = height/2 + CENTER_OFF_Y_PX;
-    
-    float drawX = cx + x * scaleFactor;
-    float drawY = cy - y * scaleFactor;
-
-    lastX = x; lastY = y;
-    lastDrawX = drawX; lastDrawY = drawY;
-    haveXY = true;
-
-    queue.addLast(new PVector(drawX, drawY));
-    if (!status.equals("CALIBRATING")) status = "RUN";
-
-    linesIn++;
-    while (queue.size() > 12000) queue.removeFirst();
-
+    handleSerialLine(trim(line));
   } catch(Exception e) {
     println("Serial error: " + e);
     disconnectSerial();
-    status = "ERROR";
+    if (!USE_SIM) status = "ERROR";
   }
+}
+
+// Zpracuje jeden řádek z ESP (už oříznutý). Volá se ze serial vlákna.
+void handleSerialLine(String line) {
+  if (line.length() == 0) return;
+
+  int now = millis();
+  boolean sim = USE_SIM;   // true = auto-SIM, jen sledujeme, jestli ESP žije
+  lastSerialLineMs = now;
+  if (!sim) lastDataMs = now;
+
+  // kalibrace: CALIB_START, CALIB_WAIT, CALIB_STILL_OK, CALIB_COLLECT,n/400 ... CALIB_OK
+  if (line.startsWith("CALIB_")) {
+    boolean calibrating = !line.equals("CALIB_OK");
+    espValidCalib = calibrating;
+    espValidMs = now;
+    if (!sim) status = calibrating ? "CALIBRATING" : "RUN";
+    return;
+  }
+
+  if (line.startsWith("ERR,")) { if (!sim) status = "ERROR"; return; }
+
+  // Souřadnice = přesně 2 čísla. Textové zprávy se 2 částmi (x,y  OK,...  MECAL_START,0 ...)
+  // dají float() == NaN -> zahodit (dřív z nich vznikaly NaN body v kresbě).
+  String[] parts = split(line, ',');
+  if (parts.length != 2) return;
+
+  float x = float(parts[0]);
+  float y = float(parts[1]);
+  if (Float.isNaN(x) || Float.isNaN(y)) return;
+
+  espValidCalib = false;
+  espValidMs = now;
+  if (sim) return;
+
+  PVector o = orientXY(x, y);
+  x = o.x; y = o.y;
+
+  float cx = width/2 + CENTER_OFF_X_PX;
+  float cy = height/2 + CENTER_OFF_Y_PX;
+
+  float drawX = cx + x * scaleFactor;
+  float drawY = cy - y * scaleFactor;
+
+  lastX = x; lastY = y;
+  lastDrawX = drawX; lastDrawY = drawY;
+  haveXY = true;
+
+  queue.addLast(new PVector(drawX, drawY));
+  if (!status.equals("CALIBRATING")) status = "RUN";
+
+  linesIn++;
+  while (queue.size() > 12000) queue.removeFirst();
 }
 
 void keyPressed() {
@@ -1056,10 +1155,10 @@ void keyPressed() {
     if (USE_SIM) {
       manualSerial = false;   // ručně SIM
       disconnectSerial();
-      status = "RUN";
-      simReset();
+      simStart(false);
     } else {
       manualSerial = true;    // ručně SERIAL => nechci auto-SIM
+      if (simDirty) applyBackgroundAndClear();
       println(Serial.list());
       connectSerial();
       status = "WAITING";
@@ -1082,8 +1181,8 @@ void keyPressed() {
   }
 
   if (key == ' ') {
-    applyBackgroundAndClear();
-    if (USE_SIM) simReset();   // smaž + rozkývej znovu od plné amplitudy
+    if (USE_SIM) simNewSwing();   // smaž + rozkývej znovu od plné amplitudy
+    else applyBackgroundAndClear();
   }
 }
 

@@ -4,20 +4,23 @@ Vykresluje stopu fyzického kreslícího kyvadla. Data (x,y výchylka, rozsah cc
 posílá **ESP32-S3 s BNO085** po USB serialu (115200 Bd); v produkci běží tato appka
 na Raspberry Pi 5 připojeném k TV. Hlavní soubor: `kyvadlo/kyvadlo.pde`.
 
-**Firmware ESP je v samostatném repozitáři `c:\Git\kyvadlo_esp\kyvadlo`** — tam je
-`CLAUDE.md` s popisem celého systému, sériového protokolu a yaw korekce. Orientaci
-obrazce (zarovnání po restartu, kompenzace yaw driftu) řeší primárně ESP
-(snap na magnetometr + `yawHome` v NVS, příkaz `SET_HOME`); zdejší orientační
-parametry (ROT90, flip, fine rotate) jsou jen doladění a měly by zůstat konstantní.
+**Firmware ESP je v samostatném repozitáři `C:\Git\kyvadlo_esp`** — tam je
+`CLAUDE.md` a `docs/` s popisem celého systému, sériového protokolu (`docs/protokol.md`)
+a vnitřku tohoto sketche (`docs/architektura.md`, kap. 4). Orientaci obrazce řeší yaw
+korekce v ESP; zdejší orientační parametry (ROT90, flip, fine rotate) jsou jen doladění
+a měly by zůstat konstantní. (`SET_HOME` / yaw snap / NVS v aktuálním firmware **nejsou**,
+leží jen v archivní ESP větvi `archiv/yaw-home`.)
 
 ## Klíčové body kódu
 
-- `serialEvent()` — parsuje řádky `x,y`; **každá textová zpráva ESP protokolu musí
-  být explicitně odfiltrována**, jinak se ji pokusí parsovat jako souřadnice.
-- Klávesy k ESP: `C` = CAL (kalibrace), `H` = SET_HOME, `Shift+H` = CLR_HOME,
-  `R` = reconnect, `T` = přepnutí SIM/SERIAL, `D` = debug HUD.
-- Auto-fallback: bez ESP běží simulace (fyzikální model kyvadla), po připojení ESP
-  se automaticky vrátí na serial.
+- `serialEvent()` → `handleSerialLine()` — parsuje řádky `x,y`; řádek se 2 částmi, kde
+  `float()` dá NaN (text), se zahodí. Zprávy `CALIB_*` a platná data = ESP je „živé“
+  (`espValidMs`).
+- Klávesy k ESP: `C` = CAL (kalibrace), `R` = reconnect, `T` = ruční SIM/SERIAL
+  (vypne auto-SIM do restartu), `D` = debug HUD.
+- Auto-SIM: když ESP 3 s neposílá data ani `CALIB_*` (chybí, mlčí, hlásí jen `ERR,…`),
+  běží náhodná simulace kyvadla (`updateSim()`: kývání → dokmitá → 10 s pauza → smazat →
+  nové kývání). Žádný nápis o odpojení. Jakmile ESP pošle platný řádek, vrátí se na serial.
 - Config (scale, orientace, barvy, render mód) se ukládá mimo repo:
   Windows `%APPDATA%\Kyvadlo\config.txt`, Linux `~/.config/kyvadlo/config.txt`.
 - Render módy: BRUSH (inkoust) a SAND (písek); pozadí bílé/černé.
