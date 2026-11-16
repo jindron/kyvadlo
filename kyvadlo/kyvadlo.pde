@@ -24,8 +24,8 @@ float ORIENT_FINE_STEP_FINE = 1.0;
 
 static final float DEG2RAD = PI / 180.0;
 
-// Helper: rotate+flip in "unit" coords
-PVector orientXY(float x, float y) {
+// Hrubá orientace: rotace po 90° + zrcadlení (bez jemné rotace)
+PVector orientCoarse(float x, float y) {
   float ox = x, oy = y;
 
   // rotace po 90° (hrubá)
@@ -36,6 +36,14 @@ PVector orientXY(float x, float y) {
   // zrcadlení
   if (ORIENT_FLIP_X) ox = -ox;
   if (ORIENT_FLIP_Y) oy = -oy;
+
+  return new PVector(ox, oy);
+}
+
+// Helper: rotate+flip in "unit" coords
+PVector orientXY(float x, float y) {
+  PVector cz = orientCoarse(x, y);
+  float ox = cz.x, oy = cz.y;
 
   // jemná rotace (plynulá) – až nakonec
   if (abs(ORIENT_FINE_DEG) > 0.0001) {
@@ -142,6 +150,137 @@ void drawCenterStatusOverlay() {
   // Stav je vidět jen v debug HUD (klávesa D).
 }
 
+// ============================
+// SROVNÁNÍ NATOČENÍ (klávesa A)
+// ============================
+// Vodicí čára + návod; kreslí se přímo na obrazovku, ne do plátna.
+void drawAlignOverlay() {
+  int now = millis();
+
+  if (!alignMode) {
+    if (now < alignInfoUntilMs) {
+      pushStyle();
+      textAlign(CENTER, TOP);
+      textSize(26);
+      fill(0, 170, 60);
+      text(alignInfo, width * 0.5, 24);
+      popStyle();
+    }
+    return;
+  }
+
+  // kyvadlo mezitím vypadlo -> není z čeho měřit
+  if (USE_SIM) { alignMode = false; return; }
+
+  float cx = width/2 + CENTER_OFF_X_PX;
+  float cy = height/2 + CENTER_OFF_Y_PX;
+
+  pushStyle();
+  stroke(255, 40, 40, 200);
+  strokeWeight(3);
+  line(0, cy, width, cy);
+  noFill();
+  ellipse(cx, cy, 24, 24);
+
+  rectMode(CENTER);
+  textAlign(CENTER, CENTER);
+  float boxW = min(width * 0.8, 1000);
+  float boxH = 150;
+  float by = height * 0.2;
+  noStroke();
+  fill(0, 170);
+  rect(width * 0.5, by, boxW, boxH, 18);
+  fill(255);
+  textSize(28);
+  text("SROVNANI NATOCENI\nRozhoupejte kyvadlo podel cervene cary a stisknete A", width * 0.5, by - 24);
+  textSize(22);
+  if (alignMsg.length() > 0) {
+    fill(255, 220, 0);
+    text(alignMsg, width * 0.5, by + 46);
+  } else {
+    fill(190);
+    text("BACKSPACE = zrusit", width * 0.5, by + 46);
+  }
+  popStyle();
+}
+
+// Spočítá hlavní směr kývání z posledních surových dat ESP a nastaví ORIENT_FINE_DEG tak,
+// aby kresba ležela na vodorovné čáře. Vrací false (a vyplní alignMsg), když data nestačí.
+boolean alignToGuide() {
+  int now = millis();
+  int n = 0;
+  double mx = 0, my = 0;
+  float[] px = new float[ALIGN_N];
+  float[] py = new float[ALIGN_N];
+
+  synchronized (alignLock) {
+    for (int i = 0; i < alignCount; i++) {
+      int idx = (alignHead - 1 - i + ALIGN_N) % ALIGN_N;
+      if (now - alignT[idx] > ALIGN_WINDOW_MS) break;
+      // hrubá orientace (ROT90 + zrcadlení) zůstává, hledáme jen jemnou rotaci
+      PVector c = orientCoarse(alignX[idx], alignY[idx]);
+      px[n] = c.x; py[n] = c.y;
+      mx += c.x; my += c.y;
+      n++;
+    }
+  }
+
+  if (n < ALIGN_MIN_POINTS) {
+    alignMsg = "Malo dat z kyvadla (" + n + " bodu). Je pripojene a kyve se?";
+    return false;
+  }
+  mx /= n; my /= n;
+
+  double sxx = 0, syy = 0, sxy = 0;
+  for (int i = 0; i < n; i++) {
+    double dx = px[i] - mx, dy = py[i] - my;
+    sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+  }
+  sxx /= n; syy /= n; sxy /= n;
+
+  // hlavní a vedlejší osa rozptylu (vlastní čísla kovarianční matice)
+  double mid = 0.5 * (sxx + syy);
+  double rad = Math.sqrt(0.25 * (sxx - syy) * (sxx - syy) + sxy * sxy);
+  double l1 = mid + rad, l2 = Math.max(0, mid - rad);
+  double rmsMajor = Math.sqrt(l1), rmsMinor = Math.sqrt(l2);
+
+  if (rmsMajor < ALIGN_MIN_RMS) {
+    alignMsg = "Kyvadlo se skoro nehybe. Rozhoupejte ho vic.";
+    return false;
+  }
+  if (rmsMinor / rmsMajor > ALIGN_MAX_ROUNDNESS) {
+    alignMsg = "Kyvadlo krouzi. Rozhoupejte ho rovne podel cary.";
+    return false;
+  }
+
+  // směr hlavní osy (matematicky, y nahoru); jemná rotace ho má dostat na 0° nebo 180°
+  double phiDeg = Math.toDegrees(0.5 * Math.atan2(2 * sxy, sxx - syy));
+  float cand1 = wrapDeg((float)(-phiDeg));
+  float cand2 = wrapDeg((float)(-phiDeg + 180));
+  float cur = wrapDeg(ORIENT_FINE_DEG);
+  // ze dvou řešení (přímka nemá šipku) vezmi to bližší dosavadnímu nastavení
+  float best = (abs(wrapDeg(cand1 - cur)) <= abs(wrapDeg(cand2 - cur))) ? cand1 : cand2;
+
+  float change = wrapDeg(best - cur);
+  ORIENT_FINE_DEG = best;
+  saveConfig();
+  applyBackgroundAndClear();
+
+  alignMsg = "";
+  alignInfo = "NATOCENI SROVNANO (zmena " + nf(change, 0, 1) + " deg)";
+  alignInfoUntilMs = millis() + 4000;
+  println("ALIGN: smer kyvani " + nf((float)phiDeg, 0, 2) + " deg, FINE_DEG => " + nf(ORIENT_FINE_DEG, 0, 2) +
+          " (zmena " + nf(change, 0, 2) + "), body=" + n + ", rms=" + nf((float)rmsMajor, 0, 4) +
+          ", kulatost=" + nf((float)(rmsMinor / rmsMajor), 0, 3));
+  return true;
+}
+
+float wrapDeg(float a) {
+  while (a > 180) a -= 360;
+  while (a <= -180) a += 360;
+  return a;
+}
+
 void editAdjust(int dir, boolean fineStep) {
   if (dir == 0) return;
 
@@ -230,6 +369,23 @@ int lastReconnectTryMs = 0;
 int noDataDisconnectMs = 1200;
 int connectGraceMs = 2500;
 int lastConnectMs = 0;
+
+// ---- srovnání natočení jednou klávesou (A) ----
+// A = zobraz vodicí čáru; rozhoupej kyvadlo podél ní; A znovu = kresba se na čáru srovná.
+boolean alignMode = false;
+String alignMsg = "";                  // proč srovnání neprošlo (zobrazí se pod návodem)
+String alignInfo = "";                 // krátké potvrzení po úspěchu
+int alignInfoUntilMs = 0;
+final Object alignLock = new Object();
+final int ALIGN_N = 600;               // posledních ~6 s surových dat z ESP (100 Hz)
+float[] alignX = new float[ALIGN_N];
+float[] alignY = new float[ALIGN_N];
+int[] alignT = new int[ALIGN_N];
+int alignHead = 0, alignCount = 0;
+int ALIGN_WINDOW_MS = 4000;            // z kolika posledních ms se počítá směr kývání
+int ALIGN_MIN_POINTS = 150;
+float ALIGN_MIN_RMS = 0.015;           // nejmenší rozkyv (unit, ~1° výchylky) pro spolehlivý směr
+float ALIGN_MAX_ROUNDNESS = 0.25;      // vedlejší/hlavní osa dráhy; nad tím to není kývání po přímce
 
 // ---- kreslení ----
 boolean canvasDirty = false;   // na plátně je něco nakreslené (od posledního smazání)
@@ -545,7 +701,7 @@ void draw() {
   }
   
   drawCenterStatusOverlay();
-  
+  drawAlignOverlay();
 }
 
 // ============================
@@ -999,9 +1155,9 @@ void drawHUD() {
     hud.text(line2, panelX + textPadX, panelY + 22);
 
     String help1 =
-      "Keys: D debug | T SIM/SERIAL | 1/2/3 sim mode | Q color | W render | E bg+clear | SPACE clear";
+      "Keys: D debug | T SIM/SERIAL | A srovnat natoceni | Q color | W render | E bg+clear | SPACE clear";
     String help2 =
-      "Edit: TAB select | <-/-> change | BACKSPACE reset | Z/X fine_deg -/+1deg | 0 autofit scale | S save cfg | C calibrate | R reconnect";
+      "Edit: TAB select | <-/-> change | BACKSPACE reset | Y/X fine_deg -/+1deg | 0 autofit scale | S save cfg | C calibrate | R reconnect";
 
     hud.text(help1, panelX + textPadX, panelY + 40);
     hud.text(help2, panelX + textPadX, panelY + 56);
@@ -1062,6 +1218,15 @@ void handleSerialLine(String line) {
   espValidMs = now;
   if (sim) return;
 
+  // surová data (před orientací) pro srovnání natočení klávesou A
+  synchronized (alignLock) {
+    alignX[alignHead] = x;
+    alignY[alignHead] = y;
+    alignT[alignHead] = now;
+    alignHead = (alignHead + 1) % ALIGN_N;
+    if (alignCount < ALIGN_N) alignCount++;
+  }
+
   PVector o = orientXY(x, y);
   x = o.x; y = o.y;
 
@@ -1083,6 +1248,25 @@ void handleSerialLine(String line) {
 }
 
 void keyPressed() {
+  // --- srovnání natočení: A = začít / potvrdit, BACKSPACE = zrušit ---
+  if (key == 'a' || key == 'A') {
+    if (USE_SIM) {
+      println("Srovnani natoceni jde jen s pripojenym kyvadlem (ted bezi simulace).");
+    } else if (!alignMode) {
+      alignMode = true;
+      alignMsg = "";
+      alignInfoUntilMs = 0;
+      applyBackgroundAndClear();
+    } else if (alignToGuide()) {
+      alignMode = false;
+    }
+    return;
+  }
+  if (alignMode && keyCode == BACKSPACE) {
+    alignMode = false;
+    return;
+  }
+
   if (key == 'd' || key == 'D') debugUI = !debugUI;
 
   // přímé ovládání FINE_DEG bez TAB výběru
