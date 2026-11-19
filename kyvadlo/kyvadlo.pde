@@ -597,8 +597,11 @@ void draw() {
     canvasLayer.beginDraw();
     canvasLayer.colorMode(HSB, 360, 100, 100, 255);
 
-    while (n < segmentsPerFrame && !queue.isEmpty()) {
-      PVector p = queue.removeFirst();
+    while (n < segmentsPerFrame) {
+      // fronta se plní z vlákna serialu; ArrayDeque není bezpečná pro dvě vlákna
+      PVector p;
+      synchronized (queue) { p = queue.pollFirst(); }
+      if (p == null) break;
 
       if (havePrev) {
 //        if (RENDER_MODE == 0) {
@@ -663,7 +666,7 @@ void draw() {
       autoSim = false;
       if (simDirty) applyBackgroundAndClear();   // simulovanou kresbu smaž
       havePrev = false;
-      queue.clear();
+      synchronized (queue) { queue.clear(); }
       lastDataMs = nowA;
       status = espValidCalib ? "CALIBRATING" : "RUN";
     }
@@ -829,7 +832,7 @@ void applyBackgroundAndClear() {
   canvasDirty = false;
   simDirty = false;
   havePrev = false;
-  queue.clear();
+  synchronized (queue) { queue.clear(); }
 }
 
 // ============================
@@ -963,7 +966,7 @@ int SIM_HOLD_MS = 10000;       // jak dlouho nechat hotovou kresbu, než se sma�
 // Spustí simulaci. holdFirst = true: stávající kresbu (např. rozkreslenou z ESP) nech ještě
 // SIM_HOLD_MS na obrazovce a smaž ji až pak; jinak smaž hned a rozkývej.
 void simStart(boolean holdFirst) {
-  queue.clear();
+  synchronized (queue) { queue.clear(); }
   havePrev = false;
   status = "RUN";
   if (holdFirst) {
@@ -1044,13 +1047,13 @@ void generateSimPoints() {
     lastDrawX = drawX; lastDrawY = drawY;
     haveXY = true;
 
-    queue.addLast(new PVector(drawX, drawY));
+    synchronized (queue) { queue.addLast(new PVector(drawX, drawY)); }
     simDirty = true;
     lastDataMs = millis();
     status = "RUN";
     linesIn++;
 
-    while (queue.size() > 12000) queue.removeFirst();
+    synchronized (queue) { while (queue.size() > 12000) queue.removeFirst(); }
   }
 }
 
@@ -1240,11 +1243,11 @@ void handleSerialLine(String line) {
   lastDrawX = drawX; lastDrawY = drawY;
   haveXY = true;
 
-  queue.addLast(new PVector(drawX, drawY));
+  synchronized (queue) { queue.addLast(new PVector(drawX, drawY)); }
   if (!status.equals("CALIBRATING")) status = "RUN";
 
   linesIn++;
-  while (queue.size() > 12000) queue.removeFirst();
+  synchronized (queue) { while (queue.size() > 12000) queue.removeFirst(); }
 }
 
 void keyPressed() {
@@ -1334,7 +1337,7 @@ void keyPressed() {
     println("TOGGLE source => " + (USE_SIM ? "SIM" : "SERIAL"));
 
     havePrev = false;
-    queue.clear();
+    synchronized (queue) { queue.clear(); }
 
     if (USE_SIM) {
       manualSerial = false;   // ručně SIM
